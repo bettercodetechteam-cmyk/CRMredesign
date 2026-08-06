@@ -1,0 +1,180 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function userRole() {
+      return userDoc().role;
+    }
+
+    function isDirector() {
+      return signedIn() && userRole() == 'director';
+    }
+
+    function isApproved() {
+      return signedIn() && userDoc().approved == true;
+    }
+
+    function iamFieldsChanged() {
+      return request.resource.data.diff(resource.data).changedKeys().hasAny([
+        'role', 'permissionsGranted', 'permissionsRevoked', 'approved', 'rejected',
+        'approvedBy', 'approvedAt', 'rejectedBy', 'rejectedAt', 'updatedBy'
+      ]);
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isDirector());
+      allow create: if signedIn() && request.auth.uid == userId
+        && request.resource.data.role == 'pending'
+        && request.resource.data.approved == false;
+      allow update: if signedIn() && (
+        (request.auth.uid == userId && !iamFieldsChanged()) ||
+        isDirector()
+      );
+      allow delete: if false;
+    }
+
+    match /approvalRequests/{docId} {
+      allow create: if signedIn();
+      allow read, update, delete: if isDirector();
+    }
+
+    match /accessAuditLog/{docId} {
+      allow read: if isDirector();
+      allow write: if false;
+    }
+
+    match /notifications/{docId} {
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isDirector());
+      allow create: if signedIn();
+      allow update, delete: if signedIn() && (resource.data.userId == request.auth.uid || isDirector());
+    }
+
+    // Module collections: require approved authenticated users.
+    // Fine-grained module checks are enforced in the client and Cloud Functions.
+    match /leads/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /students/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /fees/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /feeTransactions/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /batches/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /expenses/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /assets/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /staff/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /staffDirectory/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /promotionalOffers/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /blogs/{docId} {
+      // Public website: published posts only. CRM: approved users see all (including drafts).
+      allow read: if isApproved()
+        || resource.data.get('status', 'published') == 'published';
+      allow write: if isApproved();
+    }
+
+    match /reminders/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /reminderNotifications/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /smsMessages/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /emailQueue/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /passwordResetOTPs/{docId} {
+      allow read, write: if signedIn();
+    }
+
+    function isTaskAssignee(taskData) {
+      return request.auth.uid in taskData.assignedTo;
+    }
+
+    function employeeTaskUpdateAllowed() {
+      let keys = request.resource.data.diff(resource.data).changedKeys();
+      return keys.hasOnly(['progressPercent', 'actualHours', 'status', 'updatedAt', 'completionDate']);
+    }
+
+    function canReadTask(taskData) {
+      return isApproved() && (isDirector() || isTaskAssignee(taskData));
+    }
+
+    match /tasks/{taskId} {
+      allow read: if canReadTask(resource.data);
+      allow create: if isDirector() && isApproved();
+      allow update: if isApproved() && (
+        isDirector() ||
+        (isTaskAssignee(resource.data) && employeeTaskUpdateAllowed())
+      );
+      allow delete: if isDirector();
+
+      match /subtasks/{subId} {
+        allow read: if canReadTask(get(/databases/$(database)/documents/tasks/$(taskId)).data);
+        allow write: if isDirector() && isApproved();
+      }
+
+      match /comments/{commentId} {
+        allow read: if canReadTask(get(/databases/$(database)/documents/tasks/$(taskId)).data);
+        allow create: if isApproved() && (
+          isDirector() ||
+          isTaskAssignee(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+        );
+        allow update: if isApproved() && resource.data.userId == request.auth.uid;
+        allow delete: if isDirector();
+      }
+
+      match /activity/{activityId} {
+        allow read: if canReadTask(get(/databases/$(database)/documents/tasks/$(taskId)).data);
+        allow create: if isApproved() && (
+          isDirector() ||
+          isTaskAssignee(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+        );
+        allow update, delete: if false;
+      }
+    }
+
+    match /{collection}/{docId} {
+      allow read, write: if isApproved();
+    }
+  }
+}

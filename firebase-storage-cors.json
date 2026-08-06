@@ -1,0 +1,35 @@
+[
+  {
+    "origin": [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://localhost:5000",
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "http://127.0.0.1:3000",
+      "https://crm.zicazimapcmc.com",
+      "https://zicazimapcmc.com",
+      "https://www.zicazimapcmc.com",
+      "https://zica-zima-crm.web.app",
+      "https://zica-zima-crm.firebaseapp.com",
+      "https://zica-zima-testing.web.app",
+      "https://zica-zima-testing.firebaseapp.com"
+    ],
+    "method": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+    "maxAgeSeconds": 3600,
+    "responseHeader": [
+      "Content-Type",
+      "Authorization",
+      "Content-Length",
+      "User-Agent",
+      "x-goog-*",
+      "x-firebase-storage-version",
+      "x-goog-upload-protocol",
+      "x-goog-upload-command",
+      "x-goog-upload-header-content-length",
+      "x-goog-upload-header-content-type",
+      "x-goog-upload-status",
+      "x-goog-upload-url"
+    ]
+  }
+]

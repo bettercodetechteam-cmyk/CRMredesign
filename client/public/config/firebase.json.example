@@ -1,0 +1,9 @@
+{
+  "apiKey": "your_production_api_key",
+  "authDomain": "zica-zima-crm.firebaseapp.com",
+  "projectId": "zica-zima-crm",
+  "storageBucket": "zica-zima-crm.firebasestorage.app",
+  "messagingSenderId": "your_sender_id",
+  "appId": "your_app_id",
+  "measurementId": "G-XXXXXXXXXX"
+}

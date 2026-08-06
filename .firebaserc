@@ -1,0 +1,7 @@
+{
+  "projects": {
+    "default": "crmredesign",
+    "production": "zica-zima-crm",
+    "testing": "crmredesign"
+  }
+}

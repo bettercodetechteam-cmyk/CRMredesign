@@ -1,0 +1,21 @@
+node_modules
+.npm-cache
+dist
+backups
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+
+# Env files with real values – never commit; .env.example is template only
+.env
+.env.local
+.env.example
+.env.development
+.env.production
+client/.env
+client/.env.local
+client/.env.development
+client/.env.production
+.env.deploy
+client/public/config/firebase.json

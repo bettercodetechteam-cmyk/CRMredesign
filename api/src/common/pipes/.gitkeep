@@ -1,0 +1,1 @@
+# Custom pipes live here. The global ValidationPipe is registered in app.module.ts.

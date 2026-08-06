@@ -1,0 +1,36 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow authenticated users to read and write profile images
+    match /profiles/{userId}/{fileName} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow authenticated users to read and write documents
+    match /documents/{centreId}/{fileName} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Allow authenticated users to read and write general uploads
+    match /uploads/{centreId}/{fileName} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Allow authenticated users to read and write expense receipts
+    match /expense-receipts/{expenseId}/{fileName} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Allow public read and authenticated write for blog images
+    match /blogs/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Default rule - deny all other access
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

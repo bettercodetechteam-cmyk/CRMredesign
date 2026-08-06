@@ -1,0 +1,9 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# Secrets — the committed template is .env.example
+.env
+.env.local
+.env.*.local
+!.env.example

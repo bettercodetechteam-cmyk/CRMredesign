@@ -1,0 +1,470 @@
+// Zica-Zima CRM — Prisma schema (Phase 1)
+//
+// Design rules:
+// - Every table uses UUID surrogate PK (not roll_no / receipt_no)
+// - Business identifiers (roll_no, lead_no) are UNIQUE columns, not PKs
+// - Relations are enforced with foreign keys
+// - Fees / receipts arrive in a later phase
+//
+// Note (Prisma 7): connection URL lives in ../prisma.config.ts and PrismaService.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  director
+  centre_head
+  bdm
+  marketing
+  digital_marketing
+  faculty
+  academic_head
+  accounting
+  designer
+  employee
+  admin
+  accountant
+  pending
+}
+
+enum LeadStatus {
+  new
+  contacted
+  interested
+  visit_scheduled
+  visited
+  converted
+  lost
+}
+
+enum LeadSource {
+  walk_in
+  online
+  referral
+  social_media
+  phone
+  event
+  import
+  other
+}
+
+enum StudentStatus {
+  active
+  inactive
+  graduated
+  dropped
+}
+
+enum BatchStatus {
+  upcoming
+  ongoing
+  completed
+  cancelled
+}
+
+// ---------------------------------------------------------------------------
+// Core org tables
+// ---------------------------------------------------------------------------
+
+model Centre {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Short code used later in receipt numbers (e.g. PUNE, NASH)
+  code      String   @unique @db.VarChar(16)
+  name      String   @db.VarChar(120)
+  address   String?
+  city      String?  @db.VarChar(80)
+  state     String?  @db.VarChar(80)
+  pincode   String?  @db.VarChar(12)
+  phone     String?  @db.VarChar(20)
+  email     String?  @db.VarChar(160)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users    User[]
+  batches  Batch[]
+  leads    Lead[]
+  students Student[]
+  feePlans StudentFee[]
+  payments FeePayment[]
+  receipts Receipt[]
+  receiptCounters ReceiptCounter[]
+
+  @@map("centres")
+}
+
+model User {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Links Postgres staff row to Firebase Auth (login stays on Firebase)
+  firebaseUid  String    @unique @map("firebase_uid") @db.VarChar(128)
+  email        String    @unique @db.VarChar(160)
+  firstName    String    @map("first_name") @db.VarChar(80)
+  lastName     String?   @map("last_name") @db.VarChar(80)
+  phone        String?   @db.VarChar(20)
+  role         UserRole  @default(pending)
+  centreId     String?   @map("centre_id") @db.Uuid
+  isActive     Boolean   @default(true) @map("is_active")
+  approved     Boolean   @default(false)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre Centre? @relation(fields: [centreId], references: [id], onDelete: SetNull)
+
+  assignedLeads      Lead[]              @relation("LeadAssignee")
+  createdLeads       Lead[]              @relation("LeadCreator")
+  leadStatusChanges  LeadStatusHistory[] @relation("LeadStatusChangedBy")
+  leadActivities     LeadActivity[]      @relation("LeadActivityActor")
+  createdStudents    Student[]           @relation("StudentCreator")
+  createdFeePlans    StudentFee[]        @relation("FeePlanCreator")
+  collectedPayments  FeePayment[]        @relation("PaymentCollector")
+  issuedReceipts     Receipt[]           @relation("ReceiptIssuer")
+
+  @@index([centreId, role])
+  @@map("users")
+}
+
+model Course {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String   @db.VarChar(160)
+  code        String   @unique @db.VarChar(32)
+  /// Prefix embedded in roll numbers (e.g. WD, ANI)
+  rollPrefix  String   @map("roll_prefix") @db.VarChar(10)
+  description String?
+  /// Course length in months — used to build roll duration window (m-m)
+  durationMonths Int   @map("duration_months")
+  fees        Decimal? @db.Decimal(12, 2)
+  category    String?  @db.VarChar(80)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  batches            Batch[]
+  interestedLeads    Lead[]              @relation("LeadCourseInterest")
+  students           Student[]           @relation("StudentCourse")
+  rollStudents       Student[]           @relation("StudentRollCourse")
+  rollNumberCounters RollNumberCounter[]
+
+  @@map("courses")
+}
+
+model Batch {
+  id         String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String      @db.VarChar(160)
+  courseId   String      @map("course_id") @db.Uuid
+  centreId   String      @map("centre_id") @db.Uuid
+  startDate  DateTime?   @map("start_date") @db.Date
+  endDate    DateTime?   @map("end_date") @db.Date
+  timings    String?     @db.VarChar(120)
+  capacity   Int         @default(0)
+  status     BatchStatus @default(upcoming)
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  course   Course    @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  centre   Centre    @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  students Student[]
+
+  @@index([centreId, status])
+  @@index([courseId])
+  @@map("batches")
+}
+
+// ---------------------------------------------------------------------------
+// Leads
+// ---------------------------------------------------------------------------
+
+model Lead {
+  id                 String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Human-facing lead reference (not the PK)
+  leadNo             String     @unique @map("lead_no") @db.VarChar(32)
+  centreId           String     @map("centre_id") @db.Uuid
+  assignedToId       String?    @map("assigned_to_id") @db.Uuid
+  status             LeadStatus @default(new)
+  source             LeadSource
+  firstName          String     @map("first_name") @db.VarChar(80)
+  lastName           String?    @map("last_name") @db.VarChar(80)
+  phone              String     @db.VarChar(15)
+  email              String?    @db.VarChar(160)
+  courseInterestId   String?    @map("course_interest_id") @db.Uuid
+  notes              String?
+  lastContactAt      DateTime?  @map("last_contact_at") @db.Timestamptz(6)
+  nextFollowUpAt     DateTime?  @map("next_follow_up_at") @db.Timestamptz(6)
+  convertedStudentId String?    @unique @map("converted_student_id") @db.Uuid
+  convertedAt        DateTime?  @map("converted_at") @db.Timestamptz(6)
+  lostReason         String?    @map("lost_reason")
+  createdById        String?    @map("created_by_id") @db.Uuid
+  version            Int        @default(0)
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre             Centre             @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  assignedTo         User?              @relation("LeadAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdBy          User?              @relation("LeadCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  courseInterest     Course?            @relation("LeadCourseInterest", fields: [courseInterestId], references: [id], onDelete: SetNull)
+  convertedStudent   Student?           @relation("LeadConvertedStudent", fields: [convertedStudentId], references: [id], onDelete: SetNull)
+  studentFromLead    Student?           @relation("StudentOriginLead")
+  statusHistory      LeadStatusHistory[]
+  activities         LeadActivity[]
+
+  @@unique([centreId, phone])
+  @@index([centreId, status, updatedAt(sort: Desc)])
+  @@index([assignedToId, status])
+  @@index([nextFollowUpAt])
+  @@map("leads")
+}
+
+model LeadStatusHistory {
+  id         String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  leadId     String      @map("lead_id") @db.Uuid
+  fromStatus LeadStatus? @map("from_status")
+  toStatus   LeadStatus  @map("to_status")
+  changedById String?    @map("changed_by_id") @db.Uuid
+  note       String?
+  changedAt  DateTime    @default(now()) @map("changed_at") @db.Timestamptz(6)
+
+  lead      Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  changedBy User? @relation("LeadStatusChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@index([leadId, changedAt(sort: Desc)])
+  @@map("lead_status_history")
+}
+
+model LeadActivity {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  leadId      String   @map("lead_id") @db.Uuid
+  actorId     String?  @map("actor_id") @db.Uuid
+  activityType String  @map("activity_type") @db.VarChar(40)
+  summary     String   @db.VarChar(255)
+  details     String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  lead  Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  actor User? @relation("LeadActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([leadId, createdAt(sort: Desc)])
+  @@map("lead_activities")
+}
+
+// ---------------------------------------------------------------------------
+// Students + roll number allocation support
+// ---------------------------------------------------------------------------
+
+model Student {
+  id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Printed business key — NOT the primary key
+  /// Example: WD-2607-07-12-014  (course-YYMM-start-end-seq)
+  rollNo              String        @unique @map("roll_no") @db.VarChar(40)
+  rollCourseId        String        @map("roll_course_id") @db.Uuid
+  rollYear            Int           @map("roll_year") @db.SmallInt
+  rollMonth           Int           @map("roll_month") @db.SmallInt
+  durationStartMonth  Int           @map("duration_start_month") @db.SmallInt
+  durationEndMonth    Int           @map("duration_end_month") @db.SmallInt
+  rollSeq             Int           @map("roll_seq")
+  centreId            String        @map("centre_id") @db.Uuid
+  courseId            String        @map("course_id") @db.Uuid
+  batchId             String?       @map("batch_id") @db.Uuid
+  leadId              String?       @unique @map("lead_id") @db.Uuid
+  firstName           String        @map("first_name") @db.VarChar(80)
+  lastName            String?       @map("last_name") @db.VarChar(80)
+  phone               String        @db.VarChar(15)
+  email               String?       @db.VarChar(160)
+  parentName          String?       @map("parent_name") @db.VarChar(120)
+  parentPhone         String?       @map("parent_phone") @db.VarChar(15)
+  address             String?
+  admissionDate       DateTime      @default(dbgenerated("CURRENT_DATE")) @map("admission_date") @db.Date
+  status              StudentStatus @default(active)
+  createdById         String?       @map("created_by_id") @db.Uuid
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre     Centre  @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  course     Course  @relation("StudentCourse", fields: [courseId], references: [id], onDelete: Restrict)
+  rollCourse Course  @relation("StudentRollCourse", fields: [rollCourseId], references: [id], onDelete: Restrict)
+  batch      Batch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  lead       Lead?   @relation("StudentOriginLead", fields: [leadId], references: [id], onDelete: SetNull)
+  createdBy  User?   @relation("StudentCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  convertedFromLead Lead? @relation("LeadConvertedStudent")
+  feePlans   StudentFee[]
+  payments   FeePayment[]
+  receipts   Receipt[]
+
+  @@unique([rollCourseId, rollYear, rollMonth, durationStartMonth, durationEndMonth, rollSeq], map: "students_roll_components_unique")
+  @@index([centreId, status])
+  @@index([courseId])
+  @@index([batchId])
+  @@index([phone])
+  @@map("students")
+}
+
+/// Atomic gapless counter for roll allocation (used in convert-lead phase)
+model RollNumberCounter {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  courseId           String   @map("course_id") @db.Uuid
+  rollYear           Int      @map("roll_year") @db.SmallInt
+  rollMonth          Int      @map("roll_month") @db.SmallInt
+  durationStartMonth Int      @map("duration_start_month") @db.SmallInt
+  durationEndMonth   Int      @map("duration_end_month") @db.SmallInt
+  lastSeq            Int      @default(0) @map("last_seq")
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, rollYear, rollMonth, durationStartMonth, durationEndMonth], map: "roll_counters_bucket_unique")
+  @@map("roll_number_counters")
+}
+
+// ---------------------------------------------------------------------------
+// Fees + receipts
+// ---------------------------------------------------------------------------
+
+enum FeePlanStatus {
+  active
+  completed
+  cancelled
+}
+
+enum InstallmentStatus {
+  pending
+  partial
+  paid
+  waived
+  overdue
+}
+
+enum PaymentMode {
+  cash
+  upi
+  card
+  bank_transfer
+  cheque
+  other
+}
+
+enum PaymentStatus {
+  recorded
+  voided
+}
+
+/// Fee plan for a student (total course fees split into installments)
+model StudentFee {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  studentId   String        @map("student_id") @db.Uuid
+  centreId    String        @map("centre_id") @db.Uuid
+  totalAmount Decimal       @map("total_amount") @db.Decimal(12, 2)
+  currency    String        @default("INR") @db.VarChar(3)
+  status      FeePlanStatus @default(active)
+  notes       String?
+  createdById String?       @map("created_by_id") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  student      Student          @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  centre       Centre           @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  createdBy    User?            @relation("FeePlanCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  installments FeeInstallment[]
+  payments     FeePayment[]
+
+  @@index([studentId, status])
+  @@index([centreId, status])
+  @@map("student_fees")
+}
+
+model FeeInstallment {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  studentFeeId String           @map("student_fee_id") @db.Uuid
+  sequence    Int
+  label       String            @db.VarChar(80)
+  amountDue   Decimal           @map("amount_due") @db.Decimal(12, 2)
+  amountPaid  Decimal           @default(0) @map("amount_paid") @db.Decimal(12, 2)
+  dueDate     DateTime?         @map("due_date") @db.Date
+  status      InstallmentStatus @default(pending)
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  studentFee StudentFee   @relation(fields: [studentFeeId], references: [id], onDelete: Cascade)
+  payments   FeePayment[]
+
+  @@unique([studentFeeId, sequence])
+  @@index([status, dueDate])
+  @@map("fee_installments")
+}
+
+model FeePayment {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  studentFeeId   String        @map("student_fee_id") @db.Uuid
+  installmentId  String?       @map("installment_id") @db.Uuid
+  studentId      String        @map("student_id") @db.Uuid
+  centreId       String        @map("centre_id") @db.Uuid
+  amount         Decimal       @db.Decimal(12, 2)
+  paymentMode    PaymentMode   @map("payment_mode")
+  paidAt         DateTime      @default(now()) @map("paid_at") @db.Timestamptz(6)
+  transactionRef String?       @map("transaction_ref") @db.VarChar(120)
+  status         PaymentStatus @default(recorded)
+  notes          String?
+  collectedById  String?       @map("collected_by_id") @db.Uuid
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  studentFee  StudentFee      @relation(fields: [studentFeeId], references: [id], onDelete: Restrict)
+  installment FeeInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
+  student     Student         @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  centre      Centre          @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  collectedBy User?           @relation("PaymentCollector", fields: [collectedById], references: [id], onDelete: SetNull)
+  receipt     Receipt?
+
+  @@index([studentId, paidAt(sort: Desc)])
+  @@index([centreId, paidAt(sort: Desc)])
+  @@index([studentFeeId])
+  @@map("fee_payments")
+}
+
+/// Printed receipt — business key is receiptNo; PK is UUID
+model Receipt {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Example: RCP-PUNE-2607-000128
+  receiptNo    String   @unique @map("receipt_no") @db.VarChar(40)
+  paymentId    String   @unique @map("payment_id") @db.Uuid
+  centreId     String   @map("centre_id") @db.Uuid
+  studentId    String   @map("student_id") @db.Uuid
+  /// Snapshot fields so reprints stay historically accurate
+  studentName  String   @map("student_name") @db.VarChar(160)
+  rollNo       String   @map("roll_no") @db.VarChar(40)
+  centreCode   String   @map("centre_code") @db.VarChar(16)
+  amount       Decimal  @db.Decimal(12, 2)
+  paymentMode  PaymentMode @map("payment_mode")
+  paidAt       DateTime @map("paid_at") @db.Timestamptz(6)
+  issuedById   String?  @map("issued_by_id") @db.Uuid
+  issuedAt     DateTime @default(now()) @map("issued_at") @db.Timestamptz(6)
+
+  payment  FeePayment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  centre   Centre     @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  student  Student    @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  issuedBy User?      @relation("ReceiptIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
+
+  @@index([centreId, issuedAt(sort: Desc)])
+  @@index([studentId])
+  @@map("receipts")
+}
+
+model ReceiptCounter {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  centreId  String   @map("centre_id") @db.Uuid
+  /// YYYYMM bucket, e.g. 202607
+  yearMonth Int      @map("year_month")
+  lastSeq   Int      @default(0) @map("last_seq")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre Centre @relation(fields: [centreId], references: [id], onDelete: Cascade)
+
+  @@unique([centreId, yearMonth], map: "receipt_counters_bucket_unique")
+  @@map("receipt_counters")
+}
