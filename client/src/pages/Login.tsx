@@ -10,7 +10,7 @@ import { Loader2, Eye, EyeOff, Mail, Lock, AlertCircle, CheckCircle, ArrowLeft, 
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
 import { createUserWithEmailAndPassword, fetchSignInMethodsForEmail, signOut } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp, collection, query, where, getDocs, getDoc, updateDoc, addDoc } from 'firebase/firestore';
+import { doc, setDoc, serverTimestamp, collection, query, where, getDocs, addDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { emailService } from '@/lib/emailService';
 
@@ -108,40 +108,31 @@ export default function Login() {
 
       // Generate OTP
       const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+      const normalizedEmail = email.trim().toLowerCase();
       
       // Store OTP in Firestore with expiration (10 minutes)
-      const otpRef = doc(db, 'passwordResetOTPs', email);
+      const otpRef = doc(db, 'passwordResetOTPs', normalizedEmail);
       await setDoc(otpRef, {
         otp: otpCode,
-        email: email,
+        email: normalizedEmail,
         createdAt: serverTimestamp(),
         expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
         used: false
       });
 
-      // For testing purposes, log the OTP to console
-      console.log(`🔐 OTP for ${email}: ${otpCode}`);
-      
-      // Test EmailJS configuration first
-      emailService.testEmailJSConfig();
-      
-      // Test EmailJS template with different variable combinations
-      await emailService.testEmailJSTemplate(email);
-      
-      // Try to send OTP via email service
-      const emailSent = await emailService.sendOTPEmail(email, otpCode);
+      const emailSent = await emailService.sendOTPEmail(normalizedEmail, otpCode);
       
       if (emailSent) {
-        setResetEmail(email);
+        setResetEmail(normalizedEmail);
         setOtpSent(true);
-        showNotification('success', 'OTP Sent Successfully!', `OTP has been sent to ${email}. Please check your inbox and spam folder.`);
+        showNotification('success', 'OTP Sent Successfully!', `OTP has been sent to ${normalizedEmail}. Please check your inbox and spam folder.`);
         setMode('reset-password');
       } else {
-        // Fallback: Show OTP in UI for testing
-        setResetEmail(email);
-        setOtpSent(true);
-        showNotification('warning', 'Email Service Not Configured', `Your OTP is: ${otpCode} (This is for testing purposes)`);
-        setMode('reset-password');
+        showNotification(
+          'error',
+          'Email Service Unavailable',
+          'Unable to send OTP email. Please contact your centre administrator or try again later.'
+        );
       }
     } catch (error: any) {
       console.error("Password reset failed:", error);
@@ -168,57 +159,22 @@ export default function Login() {
     }
 
     try {
-      // Verify OTP
-      const otpRef = doc(db, 'passwordResetOTPs', resetEmail);
-      const otpDoc = await getDoc(otpRef);
-      
-      if (!otpDoc.exists()) {
-        showNotification('error', 'Invalid OTP', 'Invalid or expired OTP');
-        return;
-      }
-
-      const otpData = otpDoc.data();
-      const now = new Date();
-      const expiresAt = otpData.expiresAt.toDate();
-
-      if (now > expiresAt) {
-        showNotification('error', 'OTP Expired', 'OTP has expired. Please request a new one.');
-        return;
-      }
-
-      if (otpData.used) {
-        showNotification('error', 'OTP Already Used', 'OTP has already been used');
-        return;
-      }
-
-      if (otpData.otp !== otp) {
-        showNotification('error', 'Invalid OTP', 'Invalid OTP code');
-        return;
-      }
-
-      // Get user from Firestore
-      const userQuery = query(collection(db, 'users'), where('email', '==', resetEmail));
-      const userSnapshot = await getDocs(userQuery);
-      
-      if (userSnapshot.empty) {
-        showNotification('error', 'User Not Found', 'User not found');
-        return;
-      }
-
-      const userDoc = userSnapshot.docs[0];
-      const userData = userDoc.data();
-
-      // Update user's password in Firestore (for custom auth system)
-      await updateDoc(userDoc.ref, {
-        password: password, // Note: In production, this should be hashed
-        updatedAt: serverTimestamp()
+      const response = await fetch('/api/auth/custom-reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: resetEmail,
+          otp,
+          newPassword: password,
+        }),
       });
 
-      // Mark OTP as used
-      await updateDoc(otpRef, {
-        used: true,
-        usedAt: serverTimestamp()
-      });
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        showNotification('error', 'Password Reset Failed', result.message || 'Failed to reset password');
+        return;
+      }
 
       showNotification('success', 'Password Reset Successful!', 'Your password has been updated successfully. You can now login with your new password.');
       
@@ -513,9 +469,6 @@ export default function Login() {
             required
           />
         </div>
-        <p className="text-xs text-blue-200 mt-1">
-          💡 For testing: Copy the OTP from the success message above
-        </p>
       </div>
 
       <div className="space-y-1">
@@ -578,27 +531,30 @@ export default function Login() {
             try {
               // Generate new OTP
               const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+              const normalizedEmail = resetEmail.trim().toLowerCase();
               
               // Store new OTP in Firestore
-              const otpRef = doc(db, 'passwordResetOTPs', resetEmail);
+              const otpRef = doc(db, 'passwordResetOTPs', normalizedEmail);
               await setDoc(otpRef, {
                 otp: otpCode,
-                email: resetEmail,
+                email: normalizedEmail,
                 createdAt: serverTimestamp(),
                 expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
                 used: false
               });
 
               // Try to send new OTP via email service
-              const emailSent = await emailService.sendOTPEmail(resetEmail, otpCode);
+              const emailSent = await emailService.sendOTPEmail(normalizedEmail, otpCode);
               
               if (emailSent) {
                 setOtp('');
                 showNotification('success', 'New OTP Sent!', 'New OTP has been sent to your email. Please check your inbox and spam folder.');
               } else {
-                // Fallback: Show OTP in UI for testing
-                setOtp('');
-                showNotification('warning', 'New OTP Generated', `New OTP generated! Your new OTP is: ${otpCode} (Email service not configured - this is for testing)`);
+                showNotification(
+                  'error',
+                  'Email Service Unavailable',
+                  'Unable to resend OTP email. Please try again later or contact your centre administrator.'
+                );
               }
             } catch (error: any) {
               console.error("Resend OTP failed:", error);

@@ -8,22 +8,30 @@ export default defineConfig(({ mode }) => {
   const rootDir = path.resolve(import.meta.dirname);
   const clientDir = path.resolve(import.meta.dirname, "client");
 
-  // Local dev: always use root .env.example (testing/local Firebase).
-  // Production build: Firebase vars are overridden from root .env.
+  const loadEnvFile = (filePath: string): Record<string, string> => {
+    if (!fs.existsSync(filePath)) return {};
+    return dotenv.parse(fs.readFileSync(filePath, "utf-8"));
+  };
+
+  // Development: .env.example (template) ← root .env ← client/.env (highest priority)
+  // Production: Vite loadEnv + root .env Firebase override
   let env: Record<string, string> = {};
-  if (mode === 'development') {
-    const localExamplePath = path.join(rootDir, '.env.example');
-    if (fs.existsSync(localExamplePath)) {
-      const parsed = dotenv.parse(fs.readFileSync(localExamplePath, 'utf-8'));
-      env = { ...parsed };
-      console.log('✅ Vite (local): using', localExamplePath);
+  if (mode === "development") {
+    const exampleEnv = loadEnvFile(path.join(rootDir, ".env.example"));
+    const rootEnvFile = loadEnvFile(path.join(rootDir, ".env"));
+    const clientEnvFile = loadEnvFile(path.join(clientDir, ".env"));
+    env = { ...exampleEnv, ...rootEnvFile, ...clientEnvFile };
+
+    if (env.VITE_FIREBASE_API_KEY?.trim()) {
+      console.log("✅ Vite (local): Firebase config loaded from .env");
     } else {
-      console.warn('⚠️ Vite (local): root .env.example not found');
+      console.warn(
+        "⚠️ Vite (local): Missing Firebase vars — copy .env.example to .env and add your crmredesign Web app config"
+      );
     }
-  }
-  if (Object.keys(env).length === 0) {
-    const rootEnv = loadEnv(mode, rootDir, '');
-    const clientEnv = loadEnv(mode, clientDir, '');
+  } else {
+    const rootEnv = loadEnv(mode, rootDir, "");
+    const clientEnv = loadEnv(mode, clientDir, "");
     env = { ...rootEnv, ...clientEnv };
   }
 
@@ -47,11 +55,11 @@ export default defineConfig(({ mode }) => {
     }
   }
 
-  // In development: inject ONLY .env.example so production .env is never used locally
+  // Inject VITE_* into the client bundle via define
   const define: Record<string, string> = {};
-  if (mode === 'development' && Object.keys(env).length > 0) {
+  if (mode === "development") {
     for (const [key, value] of Object.entries(env)) {
-      if (key.startsWith('VITE_')) {
+      if (key.startsWith("VITE_") && value) {
         define[`import.meta.env.${key}`] = JSON.stringify(value);
       }
     }
@@ -83,11 +91,7 @@ export default defineConfig(({ mode }) => {
     }
   }
 
-  // In dev: use a dir without .env so only .env.example (via define) is used.
-  // In production: use clientDir so Vite loads client/.env and injects VITE_* into the bundle.
-  const envDirForMode = mode === 'development'
-    ? path.join(clientDir, 'src')  // no .env here → only define from .env.example is used
-    : clientDir;                    // production: load client/.env so Firebase config is in the build
+  const envDirForMode = clientDir;
 
   const outDir = path.resolve(import.meta.dirname, "dist/public");
 

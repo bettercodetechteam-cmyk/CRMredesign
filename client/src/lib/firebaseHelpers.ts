@@ -2,6 +2,7 @@ import { doc, setDoc, getDoc, collection, addDoc, query, where, getDocs, deleteD
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, auth, storage } from './firebase';
+import { uploadFileToStorage } from './uploadService';
 import { firebaseCache } from './firebaseCache';
 
 // Connection management
@@ -458,15 +459,20 @@ export const firebaseHelpers = {
     }
   },
 
-  // File upload helper
+  // File upload helper (S3 via server API; falls back to Firebase Storage if configured)
   async uploadFile(file: File, path: string) {
-    if (!storage) return null;
     try {
       return await retryOperation(async () => {
-        const storageRef = ref(storage, path);
-        const snapshot = await uploadBytes(storageRef, file);
-        const downloadURL = await getDownloadURL(snapshot.ref);
-        return downloadURL;
+        try {
+          const result = await uploadFileToStorage(file, path, file.name);
+          return result.url;
+        } catch (s3Error) {
+          if (!storage) throw s3Error;
+          console.warn('S3 upload failed, trying Firebase Storage:', s3Error);
+          const storageRef = ref(storage, path);
+          const snapshot = await uploadBytes(storageRef, file);
+          return getDownloadURL(snapshot.ref);
+        }
       });
     } catch (error) {
       console.error('Error uploading file:', error);
@@ -1052,300 +1058,6 @@ export const firebaseHelpers = {
       return true;
     } catch (error) {
       console.error('Error setting ZIMA curriculum folder headers:', error);
-      return false;
-    }
-  },
-  // User management and sync
-  async syncFirebaseAuthUsers() {
-    if (!db || !auth) {
-      console.error('❌ Firebase services not initialized');
-      return false;
-    }
-    
-    try {
-      console.log('🔄 Starting Firebase Auth to Firestore sync...');
-      
-      // Get all users from Firestore
-      const firestoreUsersQuery = query(collection(db, 'users'));
-      const firestoreSnapshot = await getDocs(firestoreUsersQuery);
-      const firestoreUsers = new Map();
-      
-      firestoreSnapshot.docs.forEach(doc => {
-        const data = doc.data();
-        firestoreUsers.set(data.email, { id: doc.id, ...data });
-      });
-      
-      console.log(`📊 Found ${firestoreUsers.size} users in Firestore`);
-      
-      // For each Firestore user, ensure they have proper profile data
-      let updatedCount = 0;
-      const updatePromises: Promise<void>[] = [];
-      
-      firestoreUsers.forEach((userData, email) => {
-        const user = userData as any;
-        
-        // Check if user has all required fields
-        const requiredFields = ['uid', 'email', 'firstName', 'lastName', 'role', 'centreId', 'approved'];
-        const missingFields = requiredFields.filter(field => !user[field]);
-        
-        if (missingFields.length > 0) {
-          console.log(`⚠️ User ${email} missing fields:`, missingFields);
-          
-          // Update user with missing fields
-          const updateData: any = {};
-          
-          if (!user.uid) updateData.uid = user.id || `user_${Date.now()}`;
-          if (!user.firstName) updateData.firstName = 'User';
-          if (!user.lastName) updateData.lastName = 'Name';
-          if (!user.role) updateData.role = 'centre_head';
-          if (!user.centreId) updateData.centreId = 'demo-centre-001';
-          if (user.approved === undefined) updateData.approved = true;
-          if (!user.createdAt) updateData.createdAt = new Date();
-          if (!user.updatedAt) updateData.updatedAt = new Date();
-          
-          if (Object.keys(updateData).length > 0) {
-            updatePromises.push(
-              setDoc(doc(db, 'users', user.id), updateData, { merge: true }).then(() => {
-                console.log(`✅ Updated user ${email} with missing fields`);
-                updatedCount++;
-              })
-            );
-          }
-        }
-      });
-      
-      await Promise.all(updatePromises);
-      
-      console.log(`✅ Sync completed. Updated ${updatedCount} users.`);
-      return true;
-    } catch (error) {
-      console.error('❌ Error syncing Firebase Auth users:', error);
-      return false;
-    }
-  },
-
-  async createDefaultUsers() {
-    if (!db) {
-      console.error('❌ Database not initialized');
-      return false;
-    }
-    
-    try {
-      console.log('🔄 Creating default users...');
-      
-      const defaultUsers = [
-        {
-          email: 'gauravkarewar724@gmail.com',
-          password: 'password123',
-          firstName: 'Gaurav',
-          lastName: 'Karewar',
-          role: 'director',
-          centreId: 'centre-001',
-          approved: true,
-          phone: '+91-9876543211'
-        },
-        {
-          email: 'demo@zica.edu',
-          password: 'demo123',
-          firstName: 'Demo',
-          lastName: 'User',
-          role: 'centre_head',
-          centreId: 'demo-centre-001',
-          approved: true,
-          phone: '+91-1234567890'
-        },
-        {
-          email: 'director@zica.edu',
-          password: 'director123',
-          firstName: 'Demo',
-          lastName: 'Director',
-          role: 'director',
-          centreId: 'demo-centre-001',
-          approved: true,
-          phone: '+91-1234567890'
-        }
-      ];
-      
-      for (const userData of defaultUsers) {
-        // Check if user already exists
-        const userQuery = query(collection(db, 'users'), where('email', '==', userData.email));
-        const userSnapshot = await getDocs(userQuery);
-        
-        if (userSnapshot.empty) {
-          const uid = `${userData.role}_${Date.now()}`;
-          await setDoc(doc(db, 'users', uid), {
-            uid,
-            ...userData,
-            createdAt: new Date(),
-            updatedAt: new Date()
-          });
-          console.log(`✅ Created default user: ${userData.email}`);
-        } else {
-          console.log(`ℹ️ User already exists: ${userData.email}`);
-        }
-      }
-      
-      console.log('✅ Default users creation completed');
-      return true;
-    } catch (error) {
-      console.error('❌ Error creating default users:', error);
-      return false;
-    }
-  },
-
-  async createSampleStudents() {
-    if (!db) {
-      console.error('❌ Database not initialized');
-      return false;
-    }
-    
-    try {
-      console.log('🔄 Creating sample students...');
-      
-      const sampleStudents = [
-        {
-          firstName: 'Rahul',
-          lastName: 'Sharma',
-          email: 'rahul.sharma@example.com',
-          phone: '+91-9876543210',
-          centreId: 'centre-001',
-          course: 'Animation & VFX',
-          courseDuration: '12 months',
-          actualFees: 75000,
-          discountedFees: 65000,
-          feesPaid: 25000,
-          feesBalance: 40000,
-          status: 'active',
-          admissionDate: new Date('2024-01-15'),
-          courseStartDate: new Date('2024-02-01'),
-          paymentMode: 'Installment',
-          noOfInstallments: 4,
-          installmentsPaid: 1,
-          dueDate: new Date('2024-05-01'),
-          remarks: 'Good student, regular attendance'
-        },
-        {
-          firstName: 'Priya',
-          lastName: 'Patel',
-          email: 'priya.patel@example.com',
-          phone: '+91-9876543211',
-          centreId: 'centre-001',
-          course: 'Digital Marketing',
-          courseDuration: '6 months',
-          actualFees: 45000,
-          discountedFees: 40000,
-          feesPaid: 40000,
-          feesBalance: 0,
-          status: 'active',
-          admissionDate: new Date('2024-03-01'),
-          courseStartDate: new Date('2024-03-15'),
-          paymentMode: 'Full Payment',
-          noOfInstallments: 1,
-          installmentsPaid: 1,
-          dueDate: new Date('2024-03-01'),
-          remarks: 'Completed course successfully'
-        },
-        {
-          firstName: 'Amit',
-          lastName: 'Kumar',
-          email: 'amit.kumar@example.com',
-          phone: '+91-9876543212',
-          centreId: 'demo-centre-001',
-          course: 'Web Development',
-          courseDuration: '8 months',
-          actualFees: 60000,
-          discountedFees: 55000,
-          feesPaid: 20000,
-          feesBalance: 35000,
-          status: 'active',
-          admissionDate: new Date('2024-02-01'),
-          courseStartDate: new Date('2024-02-15'),
-          paymentMode: 'Installment',
-          noOfInstallments: 3,
-          installmentsPaid: 1,
-          dueDate: new Date('2024-06-01'),
-          remarks: 'Needs follow-up for pending fees'
-        },
-        {
-          firstName: 'Neha',
-          lastName: 'Singh',
-          email: 'neha.singh@example.com',
-          phone: '+91-9876543213',
-          centreId: 'demo-centre-001',
-          course: 'Graphic Design',
-          courseDuration: '10 months',
-          actualFees: 55000,
-          discountedFees: 50000,
-          feesPaid: 50000,
-          feesBalance: 0,
-          status: 'graduated',
-          admissionDate: new Date('2023-06-01'),
-          courseStartDate: new Date('2023-06-15'),
-          paymentMode: 'Full Payment',
-          noOfInstallments: 1,
-          installmentsPaid: 1,
-          dueDate: new Date('2023-06-01'),
-          remarks: 'Course completed, excellent performance'
-        }
-      ];
-      
-      let createdCount = 0;
-      for (const studentData of sampleStudents) {
-        // Check if student already exists
-        const studentQuery = query(collection(db, 'students'), where('email', '==', studentData.email));
-        const studentSnapshot = await getDocs(studentQuery);
-        
-        if (studentSnapshot.empty) {
-          await addDoc(collection(db, 'students'), {
-            ...studentData,
-            createdAt: new Date(),
-            updatedAt: new Date()
-          });
-          console.log(`✅ Created sample student: ${studentData.firstName} ${studentData.lastName}`);
-          createdCount++;
-        } else {
-          console.log(`ℹ️ Student already exists: ${studentData.firstName} ${studentData.lastName}`);
-        }
-      }
-      
-      console.log(`✅ Sample students creation completed. Created ${createdCount} new students.`);
-      return true;
-    } catch (error) {
-      console.error('❌ Error creating sample students:', error);
-      return false;
-    }
-  },
-
-  async setupSystem() {
-    if (!db) {
-      console.error('❌ Database not initialized');
-      return false;
-    }
-    
-    try {
-      console.log('🚀 Starting system setup...');
-      
-      // Step 1: Sync existing users
-      console.log('📋 Step 1: Syncing existing users...');
-      await this.syncFirebaseAuthUsers();
-      
-      // Step 2: Create default users if they don't exist
-      console.log('👥 Step 2: Creating default users...');
-      await this.createDefaultUsers();
-      
-      // Step 3: Create sample students
-      console.log('🎓 Step 3: Creating sample students...');
-      await this.createSampleStudents();
-      
-      console.log('✅ System setup completed successfully!');
-      console.log('📝 Login credentials:');
-      console.log('   - gauravkarewar724@gmail.com / password123 (Director)');
-      console.log('   - demo@zica.edu / demo123 (Centre Head)');
-      console.log('   - director@zica.edu / director123 (Director)');
-      
-      return true;
-    } catch (error) {
-      console.error('❌ Error during system setup:', error);
       return false;
     }
   },

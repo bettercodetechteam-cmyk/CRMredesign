@@ -12,19 +12,9 @@ import { requireAuth, requireTaskDirector } from "./middleware/requireAuth";
 import { TaskService } from "./services/taskService";
 import { getFirebaseAdmin } from "./firebaseConfig";
 import { imageKitService } from "./services/imageKitService";
+import { s3StorageService } from "./services/s3Service";
 import { collection, doc, getDocs, query, updateDoc, where } from "firebase/firestore";
 import { db } from "./firebaseConfig";
-
-let currentRole = "director";
-
-export const roleContext = {
-  get role() {
-    return currentRole;
-  },
-  setRole(role: string) {
-    currentRole = role;
-  },
-};
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const toDate = (value: any): Date | null => {
@@ -49,7 +39,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         services: {
           mappleIndia: mappleTest ? "connected" : "fallback",
           firebase: "connected",
-          imagekit: "connected"
+          imagekit: "connected",
+          s3: s3StorageService.isEnabled() ? "connected" : "not_configured"
         },
         environment: process.env.NODE_ENV || "development"
       });
@@ -179,6 +170,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post("/api/auth/custom-reset-password", async (req, res) => {
+    try {
+      const { email, otp, newPassword } = req.body;
+
+      if (!email || !otp || !newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: "Email, OTP, and new password are required"
+        });
+      }
+
+      if (newPassword.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: "Password must be at least 6 characters long"
+        });
+      }
+
+      const result = await AuthService.resetPasswordWithCustomOTP(email, otp, newPassword);
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error("Error in custom password reset:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal server error"
+      });
+    }
+  });
+
   app.get("/api/auth/user-profile/:uid", async (req, res) => {
     try {
       const { uid } = req.params;
@@ -202,6 +227,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({
         success: false,
         message: "Internal server error"
+      });
+    }
+  });
+
+  app.post("/api/auth/bootstrap-profile", async (req, res) => {
+    try {
+      const { verifyBearerToken } = await import("./middleware/requireAuth");
+      const caller = await verifyBearerToken(req);
+      if (!caller) {
+        return res.status(401).json({
+          success: false,
+          message: "Authentication required.",
+        });
+      }
+
+      const { firstName, lastName } = req.body as { firstName?: string; lastName?: string };
+      const result = await AuthService.bootstrapUserProfile(
+        caller.uid,
+        caller.email || "",
+        { firstName, lastName }
+      );
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error("Error bootstrapping user profile:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal server error",
       });
     }
   });
@@ -1198,68 +1255,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Role switching (mock context only)
-  app.post("/api/switch-role", async (req, res) => {
-    try {
-      const { role } = req.body;
-      roleContext.setRole(role);
-      res.json({ success: true, role });
-    } catch {
-      res.status(500).json({ message: "Failed to switch role" });
-    }
-  });
-
-  // Firestore seed and status (optional)
-  app.get("/api/firebase-status", async (_req, res) => {
-    const hasApiKey = !!process.env.GOOGLE_API_KEY;
-    const isConnected = hasApiKey; // mock connection
-    res.json({
-      connected: isConnected,
-      message: isConnected
-        ? "Connected to Firebase Firestore"
-        : hasApiKey
-        ? "Invalid Firebase API key format"
-        : "Firebase API key not configured",
-      dataSource: isConnected ? "firestore" : "mock",
+  // Development-only endpoints (disabled in production)
+  if (process.env.NODE_ENV !== 'production') {
+    app.get("/api/firebase-status", async (_req, res) => {
+      const hasApiKey = !!process.env.GOOGLE_API_KEY;
+      res.json({
+        connected: hasApiKey,
+        message: hasApiKey
+          ? "Firebase configuration present"
+          : "Firebase API key not configured",
+        dataSource: hasApiKey ? "firestore" : "unconfigured",
+      });
     });
-  });
 
-  app.post("/api/seed-firestore", async (_req, res) => {
-    try {
-      // Note: firebaseDataSeeder module not found
-      const success = false;
-      if (success) {
-        res.json({ success: true, message: "Firestore collections seeded successfully" });
-      } else {
-        res.status(500).json({ success: false, message: "Failed to seed Firestore data" });
-      }
-    } catch (error) {
-      res.status(500).json({ success: false, message: "Error seeding Firestore data" });
-    }
-  });
-
-  // Setup test users for authentication
-  app.post("/api/setup-test-users", async (_req, res) => {
-    try {
-      // Note: setupTestUsers module not found
-      console.log("Test users setup requested but module not available");
-      
-      res.json({ 
-        success: true, 
-        message: "Director test user created successfully",
-        testUsers: [
-          { email: process.env.TEST_DIRECTOR_EMAIL || '(configured in .env)', role: 'director' }
-        ]
-      });
-    } catch (error) {
-      console.error("Error setting up test users:", error);
-      res.status(500).json({ 
-        success: false, 
-        message: "Failed to setup test users",
-        error: error instanceof Error ? error.message : "Unknown error"
-      });
-    }
-  });
+    app.post("/api/seed-firestore", async (_req, res) => {
+      res.status(501).json({ success: false, message: "Firestore seeding is not available" });
+    });
+  }
 
   // ImageKit Configuration - credentials loaded from environment variables
   const imagekitPublicKey = process.env.IMAGEKIT_PUBLIC_KEY;
@@ -1320,6 +1332,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err: any) {
       const message = err?.message ?? err?.toString?.() ?? "Delete failed";
       console.error("[delete-file] ImageKit error:", message, err?.response?.data ?? "");
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // S3 file storage (replaces Firebase Storage for uploads)
+  app.post("/api/storage/upload", requireAuth, async (req, res) => {
+    try {
+      if (!s3StorageService.isEnabled()) {
+        return res.status(503).json({
+          error: "S3 storage is not configured. Set AWS_S3_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY in .env",
+        });
+      }
+
+      const { path, fileName, contentType, fileBase64 } = req.body as {
+        path?: string;
+        fileName?: string;
+        contentType?: string;
+        fileBase64?: string;
+      };
+
+      if (!path || !fileName || !fileBase64) {
+        return res.status(400).json({ error: "path, fileName, and fileBase64 are required" });
+      }
+
+      const base64Data = fileBase64.replace(/^data:[^;]+;base64,/, "");
+      const buffer = Buffer.from(base64Data, "base64");
+      const safeName = String(fileName).replace(/[^a-zA-Z0-9._-]/g, "_") || "file";
+      const folder = String(path).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      const centreId = req.caller?.centreId || "default";
+      const key = folder.startsWith("uploads/")
+        ? `${folder}/${Date.now()}_${safeName}`
+        : `uploads/${centreId}/${folder}/${Date.now()}_${safeName}`;
+
+      const result = await s3StorageService.upload({
+        key,
+        body: buffer,
+        contentType: contentType || "application/octet-stream",
+      });
+
+      res.json({
+        url: result.url,
+        key: result.key,
+        bucket: result.bucket,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Upload failed";
+      console.error("[storage/upload] Error:", message);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.delete("/api/storage/delete", requireAuth, async (req, res) => {
+    try {
+      if (!s3StorageService.isEnabled()) {
+        return res.status(503).json({ error: "S3 storage is not configured" });
+      }
+
+      const { key } = req.body as { key?: string };
+      if (!key) {
+        return res.status(400).json({ error: "key is required" });
+      }
+
+      await s3StorageService.delete(key);
+      res.json({ success: true });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Delete failed";
+      console.error("[storage/delete] Error:", message);
       res.status(500).json({ error: message });
     }
   });

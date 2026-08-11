@@ -81,7 +81,7 @@ import {
   getLeadDocRef,
   mapLeadFieldsToEnquiryUpdate,
 } from "@/lib/leadDocumentUtils";
-import { isWebsiteEnquiryLead, type LeadRecord } from "@/lib/centreDataStore";
+import { isWebsiteEnquiryLead, centreDataStore, type LeadRecord } from "@/lib/centreDataStore";
 import { isNestLeadsEnabled } from "@/lib/nestApi";
 import {
   buildNestUpdatePayload,
@@ -819,18 +819,17 @@ export default function Leads() {
       }
       
       // Update local state immediately if we have the data
-      if (detail.leadId && detail.updates) {
-        patchLead(String(detail.leadId), detail.updates);
-      } else if (detail.action === 'create' && !isFormOpen) {
-        // For create mode, refresh all leads since we don't have the new lead ID
-        // But only if the form is not open to prevent unnecessary refreshes
-        if (import.meta.env.DEV) {
+      if (detail.leadId && detail.updates && Object.keys(detail.updates).length > 0) {
+        if (detail.action === 'create') {
+          centreDataStore.upsertLead({
+            id: String(detail.leadId),
+            ...detail.updates,
+          } as LeadRecord);
+        } else {
+          patchLead(String(detail.leadId), detail.updates);
         }
-        // Only refresh if data is stale
-        const now = Date.now();
-        if (!dataLoaded || (now - lastRefreshTime) > 5000) {
-          fetchLeads();
-        }
+      } else if (detail.action === 'create') {
+        void refreshLeadsStore();
       } else if (!isFormOpen) {
         // Fallback to full refresh, but only if form is not open and data is stale
         if (import.meta.env.DEV) {

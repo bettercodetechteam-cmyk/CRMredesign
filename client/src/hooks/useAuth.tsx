@@ -12,7 +12,6 @@ import { doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, addD
 import { auth, db } from '@/lib/firebase';
 
 import type { ModulePermission } from '@shared/permissions';
-import { isDirectorEmail, getMigrationRoleForEmail } from '@shared/permissions';
 
 interface UserProfile {
   id: string; // Document ID (Firebase UID)
@@ -73,41 +72,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     
     try {
-
       const userDoc = await getDoc(doc(db, 'users', uid));
-
 
       if (userDoc.exists()) {
         const data = userDoc.data();
-
-        // Ensure approved field exists and is properly set
-        let approvedStatus = data.approved;
-        if (approvedStatus === undefined || approvedStatus === null) {
-          approvedStatus = true;
-          
-          // Update the document in Firestore to fix this
-          try {
-            await updateDoc(doc(db, 'users', uid), {
-              approved: true,
-              updatedAt: new Date()
-            });
-          } catch (updateError) {
-            if (process.env.NODE_ENV === 'development') {
-              console.warn('Failed to update user profile approved field:', updateError);
-            }
-          }
-        }
+        const approvedStatus = data.approved === true;
 
         const profile = {
-          id: uid, // Use UID as document ID
-          uid, // Keep for backward compatibility
+          id: uid,
+          uid,
           email: data.email,
           firstName: data.firstName,
           lastName: data.lastName,
           role: data.role,
-          centreId: data.centreId || 'default-centre', // Provide fallback centreId
-          createdAt: data.createdAt?.toDate(),
-          updatedAt: data.updatedAt?.toDate(),
+          centreId: data.centreId || 'default-centre',
+          createdAt: data.createdAt?.toDate?.() ?? data.createdAt,
+          updatedAt: data.updatedAt?.toDate?.() ?? data.updatedAt,
           approved: approvedStatus,
           permissionsGranted: data.permissionsGranted ?? [],
           permissionsRevoked: data.permissionsRevoked ?? [],
@@ -116,14 +96,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return profile;
       }
 
-
       return null;
     } catch (error) {
       if (process.env.NODE_ENV === 'development') {
-      console.error('❌ Error fetching user profile:', error);
+        console.error('❌ Error fetching user profile:', error);
       }
       return null;
     }
+  };
+
+  const bootstrapUserProfile = async (firebaseUser: FirebaseUser): Promise<void> => {
+    const token = await firebaseUser.getIdToken();
+    const displayParts = firebaseUser.displayName?.split(' ') ?? [];
+    const response = await fetch('/api/auth/bootstrap-profile', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        firstName: displayParts[0] || 'User',
+        lastName: displayParts.slice(1).join(' ') || '',
+      }),
+    });
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || 'Failed to set up user profile');
+    }
+  };
+
+  const ensureUserProfile = async (firebaseUser: FirebaseUser): Promise<UserProfile | null> => {
+    let profile = await fetchUserProfile(firebaseUser.uid);
+    if (profile) {
+      return profile;
+    }
+
+    await bootstrapUserProfile(firebaseUser);
+    profile = await fetchUserProfile(firebaseUser.uid);
+    return profile;
   };
 
   const refreshUserProfile = useCallback(async () => {
@@ -173,31 +184,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const firebaseUser = userCredential.user;
       
-      const userProfile = await fetchUserProfile(firebaseUser.uid);
+      const userProfile = await ensureUserProfile(firebaseUser);
       
       if (!userProfile) {
-        const migratedRole = getMigrationRoleForEmail(firebaseUser.email || email);
-        const isKnownDirector = isDirectorEmail(firebaseUser.email || email);
-        const basicProfile = {
-          id: firebaseUser.uid,
-          uid: firebaseUser.uid,
-          email: firebaseUser.email || email,
-          firstName: firebaseUser.displayName?.split(' ')[0] || 'User',
-          lastName: firebaseUser.displayName?.split(' ')[1] || '',
-          role: migratedRole ?? 'pending',
-          approved: isKnownDirector || Boolean(migratedRole),
-          permissionsGranted: [],
-          permissionsRevoked: [],
-          createdAt: new Date(),
-          updatedAt: new Date()
-        };
-        
-        await setDoc(doc(db, 'users', firebaseUser.uid), basicProfile);
-      } else {
-        if (userProfile.approved === false) {
-          await firebaseSignOut(auth);
-          throw new Error('Your account is pending approval. Please contact your administrator.');
-        }
+        throw new Error('Failed to load user profile. Please try again.');
+      }
+
+      if (userProfile.approved === false) {
+        await firebaseSignOut(auth);
+        throw new Error('Your account is pending approval. Please contact your administrator.');
       }
       
     } catch (error: any) {
@@ -212,6 +207,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error('Too many failed attempts. Please try again later.');
       } else if (error.code === 'auth/user-disabled') {
         throw new Error('This account has been disabled. Please contact support.');
+      } else if (error.code === 'permission-denied') {
+        throw new Error('Account setup failed due to permissions. Please contact your administrator.');
       } else {
         throw new Error(error.message || 'Sign in failed. Please try again.');
       }
@@ -341,14 +338,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       
       if (firebaseUser) {
         setUser(firebaseUser);
-        const profile = await fetchUserProfile(firebaseUser.uid);
-        if (profile) {
+        try {
+          const profile = await ensureUserProfile(firebaseUser);
           setUserProfile(profile);
-          setLoading(false);
-        } else {
+        } catch (bootstrapError) {
+          console.error('Failed to load user profile:', bootstrapError);
           setUserProfile(null);
-          setLoading(false);
         }
+        setLoading(false);
       } else {
         clearAllSessionData();
         setUser(null);

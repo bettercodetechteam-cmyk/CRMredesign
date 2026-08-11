@@ -30,8 +30,7 @@ import { TaskComments } from '@/components/tasks/TaskComments';
 import { TaskActivityTimeline } from '@/components/tasks/TaskActivityTimeline';
 import { TaskSubtasksList } from '@/components/tasks/TaskSubtasksList';
 import { TaskConfirmDialog } from '@/components/tasks/TaskConfirmDialog';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { storage } from '@/lib/firebase';
+import { uploadFileToStorage } from '@/lib/uploadService';
 
 export default function TaskDetail() {
   const { taskId } = useParams<{ taskId: string }>();
@@ -145,18 +144,16 @@ export default function TaskDetail() {
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !storage) return;
+    if (!file) return;
     setUploading(true);
     try {
-      const path = `tasks/${taskId}/${Date.now()}_${file.name}`;
-      const storageRef = ref(storage, path);
-      await uploadBytes(storageRef, file);
-      const url = await getDownloadURL(storageRef);
+      const result = await uploadFileToStorage(file, `tasks/${taskId}`, file.name);
       await taskService.addAttachment(taskId!, {
-        url,
+        url: result.url,
         name: file.name,
         uploadedBy: userProfile?.uid || '',
         uploadedAt: new Date().toISOString(),
+        storageKey: result.key,
       });
       invalidate();
       toast({ title: 'File uploaded' });

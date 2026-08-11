@@ -1,4 +1,10 @@
 import { auth } from '../firebaseConfig';
+import { getFirebaseAdmin } from '../firebaseConfig';
+import {
+  getMigrationRoleForEmail,
+  isDirectorEmail,
+  normalizeEmail,
+} from '@shared/permissions';
 import { 
   sendPasswordResetEmail, 
   confirmPasswordReset, 
@@ -43,7 +49,9 @@ export class AuthService {
    */
   static async sendOTPEmail(email: string, otp: string, subject: string = 'Password Reset OTP - ZICA ZIMA CRM'): Promise<PasswordResetResult> {
     try {
-      console.log(`📧 Sending OTP email to ${email}: ${otp}`);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`📧 Sending OTP email to ${email}`);
+      }
       
       // Method 1: Try SendGrid if configured
       if (process.env.SENDGRID_API_KEY) {
@@ -156,11 +164,10 @@ export class AuthService {
         console.error('Firestore queue failed:', firestoreError);
       }
 
-      // If all methods fail, return success anyway for testing purposes
-      console.log('⚠️ All email methods failed, but returning success for testing');
+      // If all methods fail, return failure — never expose OTP in logs or responses
       return {
-        success: true,
-        message: 'OTP email processing initiated (check console for OTP)'
+        success: false,
+        message: 'Unable to send OTP email. Email service is not configured.'
       };
     } catch (error: any) {
       console.error('Error sending OTP email:', error);
@@ -257,6 +264,88 @@ export class AuthService {
   }
 
   /**
+   * Reset password using a custom OTP stored in Firestore (server-side verification).
+   */
+  static async resetPasswordWithCustomOTP(
+    email: string,
+    otp: string,
+    newPassword: string
+  ): Promise<PasswordResetResult> {
+    try {
+      const admin = await getFirebaseAdmin();
+      if (!admin?.adminDb) {
+        return {
+          success: false,
+          message: 'Password reset service is temporarily unavailable'
+        };
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const otpRef = admin.adminDb.collection('passwordResetOTPs').doc(normalizedEmail);
+      const otpDoc = await otpRef.get();
+
+      if (!otpDoc.exists) {
+        return { success: false, message: 'Invalid or expired OTP' };
+      }
+
+      const otpData = otpDoc.data()!;
+      const expiresAt = otpData.expiresAt?.toDate?.() ?? new Date(otpData.expiresAt);
+
+      if (!expiresAt || new Date() > expiresAt) {
+        return { success: false, message: 'OTP has expired. Please request a new one.' };
+      }
+
+      if (otpData.used) {
+        return { success: false, message: 'OTP has already been used' };
+      }
+
+      if (otpData.otp !== otp) {
+        return { success: false, message: 'Invalid OTP code' };
+      }
+
+      const usersSnapshot = await admin.adminDb
+        .collection('users')
+        .where('email', '==', normalizedEmail)
+        .limit(1)
+        .get();
+
+      let uid: string | undefined;
+
+      if (!usersSnapshot.empty) {
+        const userDoc = usersSnapshot.docs[0];
+        uid = userDoc.data().uid || userDoc.id;
+      } else {
+        const firebaseAdmin = await import('firebase-admin');
+        try {
+          const authUser = await firebaseAdmin.auth().getUserByEmail(normalizedEmail);
+          uid = authUser.uid;
+        } catch {
+          return { success: false, message: 'User not found' };
+        }
+      }
+
+      const firebaseAdmin = await import('firebase-admin');
+      await firebaseAdmin.auth().updateUser(uid!, { password: newPassword });
+
+      await otpRef.update({
+        used: true,
+        usedAt: new Date()
+      });
+
+      return {
+        success: true,
+        message: 'Password reset successfully'
+      };
+    } catch (error: any) {
+      console.error('Error resetting password with custom OTP:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to reset password'
+      };
+    }
+  }
+
+  /**
    * Get user profile by UID
    */
   static async getUserProfile(uid: string) {
@@ -326,6 +415,91 @@ export class AuthService {
       return {
         success: false,
         message: error.message || 'Failed to approve user'
+      };
+    }
+  }
+
+  /**
+   * Create or repair a Firestore user profile using Admin SDK (bypasses security rules).
+   */
+  static async bootstrapUserProfile(
+    uid: string,
+    email: string,
+    options?: { firstName?: string; lastName?: string }
+  ) {
+    try {
+      const adminBundle = await getFirebaseAdmin();
+      if (!adminBundle?.adminDb) {
+        return {
+          success: false,
+          message: 'Firebase Admin is not configured on the server',
+        };
+      }
+
+      const admin = await import('firebase-admin');
+      const userRef = adminBundle.adminDb.collection('users').doc(uid);
+      const existing = await userRef.get();
+      const normalizedEmail = normalizeEmail(email);
+      const migratedRole = getMigrationRoleForEmail(normalizedEmail);
+      const isDirector = isDirectorEmail(normalizedEmail);
+      const now = admin.firestore.FieldValue.serverTimestamp();
+
+      if (existing.exists) {
+        const data = existing.data() as Record<string, unknown>;
+        const patch: Record<string, unknown> = { updatedAt: now };
+        const shouldAutoApprove = isDirector || Boolean(migratedRole);
+
+        if (shouldAutoApprove && data.approved !== true) {
+          patch.approved = true;
+        }
+        if (migratedRole && data.role !== migratedRole) {
+          patch.role = migratedRole;
+        }
+        if (!data.centreId) {
+          patch.centreId = 'default-centre';
+        }
+
+        if (Object.keys(patch).length > 1) {
+          await userRef.update(patch);
+        }
+
+        const refreshed = await userRef.get();
+        return {
+          success: true,
+          created: false,
+          data: refreshed.data(),
+        };
+      }
+
+      const role = migratedRole ?? 'pending';
+      const approved = isDirector || Boolean(migratedRole);
+      const profile = {
+        uid,
+        email: normalizedEmail || email,
+        firstName: options?.firstName || 'User',
+        lastName: options?.lastName || '',
+        role,
+        centreId: 'default-centre',
+        approved,
+        permissionsGranted: [],
+        permissionsRevoked: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await userRef.set(profile);
+      const created = await userRef.get();
+
+      return {
+        success: true,
+        created: true,
+        data: created.data(),
+      };
+    } catch (error: unknown) {
+      console.error('Error bootstrapping user profile:', error);
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Failed to bootstrap user profile',
       };
     }
   }

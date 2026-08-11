@@ -11,8 +11,8 @@ import {
   serverTimestamp,
   Timestamp
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from './firebase';
+import { db } from './firebase';
+import { uploadFileToStorage } from './uploadService';
 
 export type BlogSectionType = 'heading' | 'text_block' | 'grid_list' | 'image' | 'comparison_table';
 
@@ -145,14 +145,9 @@ async function compressImageToBlob(
 
 async function uploadBlobToStorage(blob: Blob, originalName: string): Promise<string> {
   const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.[^.]+$/, '') || 'image';
-  const path = `blogs/${Date.now()}_${safeName}.jpg`;
-  const storageRef = ref(storage, path);
-  await withTimeout(
-    uploadBytes(storageRef, blob, { contentType: 'image/jpeg' }),
-    STORAGE_UPLOAD_TIMEOUT_MS,
-    'Storage upload timed out'
-  );
-  return getDownloadURL(storageRef);
+  const fileName = `${Date.now()}_${safeName}.jpg`;
+  const result = await uploadFileToStorage(blob, 'blogs', fileName);
+  return result.url;
 }
 
 export type ImageUploadResult = {
@@ -225,13 +220,15 @@ export const blogService = {
 
     onProgress?.('uploading');
 
-    if (storage) {
-      try {
-        const url = await uploadBlobToStorage(prepared, file.name);
-        return { url, method: 'storage' };
-      } catch (error) {
-        console.warn('Firebase Storage upload failed, using embedded fallback:', error);
-      }
+    try {
+      const url = await withTimeout(
+        uploadBlobToStorage(prepared, file.name),
+        STORAGE_UPLOAD_TIMEOUT_MS,
+        'Storage upload timed out'
+      );
+      return { url, method: 'storage' };
+    } catch (error) {
+      console.warn('S3 upload failed, using embedded fallback:', error);
     }
 
     const dataUrl = await blobToDataUrl(prepared);

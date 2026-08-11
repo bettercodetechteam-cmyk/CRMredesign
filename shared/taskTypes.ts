@@ -46,6 +46,7 @@ export interface TaskAttachment {
   name: string;
   uploadedBy: string;
   uploadedAt: string;
+  storageKey?: string;
 }
 
 export interface Task {

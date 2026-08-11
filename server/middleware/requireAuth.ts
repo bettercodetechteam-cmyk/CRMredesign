@@ -85,6 +85,25 @@ export async function authenticateRequest(req: Request, res: Response): Promise<
   };
 }
 
+export async function verifyBearerToken(
+  req: Request
+): Promise<{ uid: string; email?: string } | null> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authHeader.slice(7);
+  const adminBundle = await getFirebaseAdmin();
+  if (!adminBundle?.adminApp) {
+    return null;
+  }
+
+  const admin = await import("firebase-admin");
+  const decoded = await admin.auth().verifyIdToken(token);
+  return { uid: decoded.uid, email: decoded.email };
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
     const caller = await authenticateRequest(req, res);

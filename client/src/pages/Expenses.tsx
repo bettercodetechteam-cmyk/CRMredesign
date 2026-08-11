@@ -72,8 +72,9 @@ import {
   ChevronDown
 } from "lucide-react";
 import { collection, addDoc, updateDoc, deleteDoc, doc, getDocs, query, orderBy, Timestamp } from "firebase/firestore";
-import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { ref, deleteObject } from "firebase/storage";
 import { db, storage } from "@/lib/firebase";
+import { uploadFileToStorage, deleteFileFromStorage } from "@/lib/uploadService";
 import { useAuth } from "@/hooks/useAuth";
 import { usePageLoadingSignal } from "@/contexts/NavigationLoadingContext";
 import ExpenseAnalytics from "@/components/ExpenseAnalytics";
@@ -340,10 +341,15 @@ export default function Expenses() {
   };
 
 
-  // Delete image from Firebase Storage
-  const deleteImageFromStorage = async (imagePath: string) => {
-    if (imagePath) {
-      const imageRef = ref(storage, imagePath);
+  // Delete image from storage (S3 or legacy Firebase Storage)
+  const deleteImageFromStorage = async (expense: { receiptImagePath?: string; storageMethod?: string }) => {
+    if (!expense.receiptImagePath) return;
+    if (expense.storageMethod === 's3') {
+      await deleteFileFromStorage(expense.receiptImagePath);
+      return;
+    }
+    if (storage) {
+      const imageRef = ref(storage, expense.receiptImagePath);
       await deleteObject(imageRef);
     }
   };
@@ -386,56 +392,41 @@ export default function Expenses() {
         throw new Error(`Failed to create expense document: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
         
-        // Convert image to base64 if provided
-        let imageData = '';
+        // Upload receipt to S3 (fallback to base64 if S3 unavailable)
         if (data.receiptImage) {
-          console.log('🔄 NEW: Converting image to base64 for expense:', docRef.id);
-          console.log('Image file details:', {
-            name: data.receiptImage.name,
-            size: data.receiptImage.size,
-            type: data.receiptImage.type
-          });
-          
+          console.log('Uploading receipt for expense:', docRef.id);
           setIsUploading(true);
           setMutationProgress('Processing receipt image...');
           try {
-            imageData = await convertImageToBase64(data.receiptImage);
-            
-            console.log('Image converted to base64, updating document...');
-            console.log('Base64 data length:', imageData.length);
-            
-            setMutationProgress('Updating expense with image...');
-            // Update the document with base64 image data
-          await updateDoc(docRef, {
+            const uploadResult = await uploadFileToStorage(
+              data.receiptImage,
+              `expenses/${docRef.id}`,
+              data.receiptImage.name
+            );
+            await updateDoc(docRef, {
+              receiptImageUrl: uploadResult.url,
+              receiptImagePath: uploadResult.key,
+              receiptImageData: null,
+              storageMethod: 's3',
+            });
+            setMutationProgress('Image uploaded successfully!');
+          } catch (s3Error) {
+            console.warn('S3 upload failed, falling back to base64:', s3Error);
+            const imageData = await convertImageToBase64(data.receiptImage);
+            await updateDoc(docRef, {
               receiptImageData: imageData,
-              receiptImageUrl: null, // No URL for base64 storage
-              receiptImagePath: null, // No path for base64 storage
-              storageMethod: 'base64' // Indicate this was stored as base64
+              receiptImageUrl: null,
+              receiptImagePath: null,
+              storageMethod: 'base64',
             });
-            console.log('Document updated with base64 image data successfully');
-            setMutationProgress('Image processed successfully!');
-          } catch (error) {
-            console.error('Image processing failed:', error);
-            console.error('Error details:', {
-              name: error instanceof Error ? error.name : 'Unknown',
-              message: error instanceof Error ? error.message : String(error)
-            });
-            setMutationProgress('Image processing failed, but expense created');
-            // Continue without image - don't fail the entire expense creation
-            toast({ 
-              title: "Warning", 
-              description: `Expense created successfully, but image processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`, 
-              variant: "destructive" 
-            });
-      } finally {
-        setIsUploading(false);
-      }
-        } else {
-          console.log('No image provided for expense:', docRef.id);
+            setMutationProgress('Image saved as fallback (base64)');
+          } finally {
+            setIsUploading(false);
+          }
         }
 
         console.log('Mutation completed successfully');
-        return { id: docRef.id, ...expenseData, receiptImageData: imageData, receiptImageUrl: null, receiptImagePath: null };
+        return { id: docRef!.id, ...expenseData };
     },
     onSuccess: () => {
       console.log('Create mutation onSuccess called');
@@ -477,29 +468,29 @@ export default function Expenses() {
           updatedAt: Timestamp.now(),
         };
 
-      // Handle image processing if new image is provided
-        if (data.receiptImage) {
+      if (data.receiptImage) {
         setIsUploading(true);
         try {
-          // Convert new image to base64
+          const uploadResult = await uploadFileToStorage(
+            data.receiptImage,
+            `expenses/${id}`,
+            data.receiptImage.name
+          );
+          updateData.receiptImageUrl = uploadResult.url;
+          updateData.receiptImagePath = uploadResult.key;
+          updateData.receiptImageData = null;
+          updateData.storageMethod = 's3';
+        } catch (s3Error) {
+          console.warn('S3 upload failed during update, using base64:', s3Error);
           const imageData = await convertImageToBase64(data.receiptImage);
-          
           updateData.receiptImageData = imageData;
-          updateData.receiptImageUrl = null; // No URL for base64 storage
-          updateData.receiptImagePath = null; // No path for base64 storage
-          updateData.storageMethod = 'base64'; // Indicate this was stored as base64
-        } catch (error) {
-          console.error('Image processing failed during update:', error);
-          // Continue without image - don't fail the entire expense update
-          toast({ 
-            title: "Warning", 
-            description: "Expense updated successfully, but image processing failed. Please try uploading the image again later.", 
-            variant: "destructive" 
-          });
+          updateData.receiptImageUrl = null;
+          updateData.receiptImagePath = null;
+          updateData.storageMethod = 'base64';
         } finally {
           setIsUploading(false);
         }
-        }
+      }
 
         await updateDoc(expenseRef, updateData);
         return { id, ...updateData };
@@ -527,7 +518,7 @@ export default function Expenses() {
       
       // Delete image from storage if exists
       if (expense?.receiptImagePath) {
-        await deleteImageFromStorage(expense.receiptImagePath);
+        await deleteImageFromStorage(expense);
       }
       
       // Delete document from Firestore

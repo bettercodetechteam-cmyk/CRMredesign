@@ -57,7 +57,7 @@ const checkDomainAuthorization = () => {
   
   if (isProduction) {
     if (import.meta.env.DEV) {
-      console.log('✅ Production domain detected - ensure crm.zicazimapcmc.com is authorized in Firebase Console (zica-zima-crm)');
+      console.log('Production domain detected — ensure crm.zicazimapcmc.com is authorized in Firebase Console (crmredesign)');
       console.log('📋 Go to: Firebase Console > Authentication > Settings > Authorized domains');
     }
     return true;

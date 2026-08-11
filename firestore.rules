@@ -122,8 +122,11 @@ service cloud.firestore {
       allow read, write: if isApproved();
     }
 
-    match /passwordResetOTPs/{docId} {
-      allow read, write: if signedIn();
+    match /passwordResetOTPs/{email} {
+      // OTP verification and password updates are handled server-side via Firebase Admin SDK.
+      allow read, update, delete: if false;
+      allow create: if request.resource.data.email == email
+        && request.resource.data.keys().hasAll(['otp', 'email', 'expiresAt', 'used']);
     }
 
     function isTaskAssignee(taskData) {

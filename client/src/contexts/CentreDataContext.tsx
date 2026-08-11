@@ -27,8 +27,8 @@ export function CentreDataProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   useEffect(() => {
-    if (centreId || userProfile?.role === 'director' || userProfile?.role === 'centre_head') {
-      centreDataStore.init({ centreId: centreId || 'global', role: userProfile?.role });
+    if (centreId || userProfile?.role) {
+      centreDataStore.init({ centreId: centreId || 'default-centre', role: userProfile?.role });
     } else {
       centreDataStore.cleanup();
     }

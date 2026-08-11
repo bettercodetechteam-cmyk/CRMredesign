@@ -19,7 +19,7 @@ import { commonSchemas, type LeadFormData } from "@/lib/validationUtils";
 import { UserPlus, GraduationCap, Target, Calendar, XCircle, Bell, Clock, Plus, Edit, Trash2, ChevronDown } from "lucide-react";
 import { defaultSources, getAllSources, addCustomSource, sourceManagerEvents } from "@/lib/sourceManager";
 import { reminderService } from "@/lib/reminderService";
-import { isWebsiteEnquiryLead } from "@/lib/centreDataStore";
+import { isWebsiteEnquiryLead, centreDataStore, type LeadRecord } from "@/lib/centreDataStore";
 import {
   getEnquiryDocumentId,
   getLeadDocRef,
@@ -50,7 +50,6 @@ import {
   mapUiStatusToNest,
 } from "@/lib/nestLeadMapper";
 import { nestLeadsApi } from "@/services/nest/leadsApi";
-import { centreDataStore } from "@/lib/centreDataStore";
 
 interface LeadFormProps {
   open: boolean;
@@ -1153,7 +1152,11 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
             }
 
             const ui = mapNestLeadToUi(finalLead as Parameters<typeof mapNestLeadToUi>[0]);
-            await centreDataStore.refresh();
+            try {
+              await centreDataStore.refresh();
+            } catch (refreshError) {
+              console.warn('Lead saved via Nest but list refresh failed:', refreshError);
+            }
             return {
               id: ui.id,
               leadName: ui.leadName,
@@ -1212,7 +1215,11 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
             }
 
             const ui = mapNestLeadToUi(finalLead as Parameters<typeof mapNestLeadToUi>[0]);
-            await centreDataStore.refresh();
+            try {
+              await centreDataStore.refresh();
+            } catch (refreshError) {
+              console.warn('Lead saved via Nest but list refresh failed:', refreshError);
+            }
             return {
               id: ui.id,
               leadName: ui.leadName,
@@ -1389,6 +1396,28 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
               await reminderService.updateReminderFromLead(data);
             }
           }
+
+          if (mode === "create" && leadId && !data?.nestBacked) {
+            centreDataStore.upsertLead({
+              id: String(leadId),
+              leadName: data.leadName ?? '',
+              contact: data.contact ?? '',
+              emailId: data.emailId ?? '',
+              course: data.course ?? '',
+              source: data.source ?? '',
+              status: data.status ?? 'Not Contacted',
+              counselorName: data.counselorName ?? '',
+              remark: data.remark ?? '',
+              cityArea: data.cityArea ?? '',
+              enquiryDate: data.enquiryDate ?? new Date(),
+              createdAt: data.createdAt ?? new Date(),
+              updatedAt: data.updatedAt ?? new Date(),
+              centreId: data.centreId ?? userProfile?.centreId ?? 'unknown',
+              followUpDate: data.followUpDate ?? null,
+              nextFollowUpDate: data.nextFollowUpDate ?? data.followUpDate ?? null,
+            } as LeadRecord);
+            void centreDataStore.refresh();
+          }
           
           toast({
             title: "Success",
@@ -1472,7 +1501,23 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
           finalRemark: data.finalRemark || '',
           updatedAt: new Date(),
           updatedBy: userProfile?.uid || 'unknown'
-        } : {};
+        } : {
+          leadName: data.leadName || '',
+          contact: data.contact || '',
+          emailId: data.emailId || '',
+          course: data.course || '',
+          source: data.source || '',
+          status: data.status || '',
+          counselorName: data.counselorName || '',
+          remark: data.remark || '',
+          cityArea: data.cityArea || '',
+          enquiryDate: data.enquiryDate || new Date(),
+          createdAt: data.createdAt || new Date(),
+          updatedAt: data.updatedAt || new Date(),
+          centreId: data.centreId || userProfile?.centreId || 'unknown',
+          followUpDate: data.followUpDate || null,
+          nextFollowUpDate: data.nextFollowUpDate || data.followUpDate || null,
+        };
         
         window.dispatchEvent(new CustomEvent('leadDataUpdated', {
           detail: {
@@ -1482,8 +1527,8 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
             data: data,
             updates: updates,
             source: 'lead_form',
-            preventRefresh: true,
-            preventCascade: true,
+            preventRefresh: false,
+            preventCascade: mode === 'edit',
           }
         }));
 

@@ -10,10 +10,8 @@
       "https://crm.zicazimapcmc.com",
       "https://zicazimapcmc.com",
       "https://www.zicazimapcmc.com",
-      "https://zica-zima-crm.web.app",
-      "https://zica-zima-crm.firebaseapp.com",
-      "https://zica-zima-testing.web.app",
-      "https://zica-zima-testing.firebaseapp.com"
+      "https://crmredesign.web.app",
+      "https://crmredesign.firebaseapp.com"
     ],
     "method": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
     "maxAgeSeconds": 3600,

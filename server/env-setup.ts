@@ -69,10 +69,14 @@ if (isDev) {
   }
 }
 
-console.log("DEBUG: GOOGLE_API_KEY =", process.env.GOOGLE_API_KEY); 
-console.log("DEBUG: FIREBASE_PROJECT_ID =", process.env.FIREBASE_PROJECT_ID);
-console.log("DEBUG: FIREBASE_CLIENT_EMAIL =", process.env.FIREBASE_CLIENT_EMAIL ? "✅ Set" : "❌ Missing");
-console.log("DEBUG: FIREBASE_PRIVATE_KEY =", process.env.FIREBASE_PRIVATE_KEY ? "✅ Set" : "❌ Missing");
+if (process.env.NODE_ENV !== 'production') {
+  console.log("Env status:", {
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY ? "Set" : "Missing",
+    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID ? "Set" : "Missing",
+    FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL ? "Set" : "Missing",
+    FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY ? "Set" : "Missing",
+  });
+}
 
 // ImageKit Configuration - Updated with proper environment variable handling
 export const IMAGEKIT_CONFIG = {
@@ -139,8 +143,10 @@ const validateFirebaseAdminConfig = () => {
   }
 
   if (errors.length > 0) {
-    console.error("❌ Firebase Admin Configuration Errors:", errors);
-    console.log("⚠️ Firebase Admin will not be available - login sessions will use mock data");
+    console.error("Firebase Admin Configuration Errors:", errors);
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn("Firebase Admin will not be available without valid credentials.");
+    }
     return false;
   }
 
@@ -152,6 +158,26 @@ const validateFirebaseAdminConfig = () => {
   return true;
 };
 
+const validateS3Config = () => {
+  const bucket = process.env.AWS_S3_BUCKET?.trim();
+  const hasKeys = process.env.AWS_ACCESS_KEY_ID?.trim() && process.env.AWS_SECRET_ACCESS_KEY?.trim();
+
+  if (!bucket || !hasKeys) {
+    console.warn(
+      "⚠️ S3 storage not configured (AWS_S3_BUCKET / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY). " +
+        "File uploads will fall back to base64 or Firebase Storage where applicable."
+    );
+    return false;
+  }
+
+  console.log("✅ S3 storage configuration loaded:", {
+    bucket,
+    region: process.env.AWS_REGION || "ap-south-1",
+  });
+  return true;
+};
+
 // Validate configuration on startup
 validateImageKitConfig();
-validateFirebaseAdminConfig(); 
+validateFirebaseAdminConfig();
+validateS3Config(); 

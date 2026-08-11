@@ -10,10 +10,8 @@ import Layout from "@/components/Layout";
 import { PermissionRoute } from "@/components/ProtectedRoute";
 import GlobalReminderNotification from "@/components/GlobalReminderNotification";
 import Login from "@/pages/Login";
-import TestCredentials from "@/pages/TestCredentials";
 import Loading from "@/components/ui/loading";
 import NetworkErrorBoundary from "@/components/NetworkErrorBoundary";
-import FirebaseTest from "@/components/FirebaseTest";
 import QuotaMonitor from "@/components/QuotaMonitor";
 import OfflineIndicator from "@/components/OfflineIndicator";
 import { quotaMonitor } from "@/lib/quotaMonitor";
@@ -235,12 +233,10 @@ function Router() {
     );
   }
 
-  // Otherwise, show Login page or Bettercode login or Test Credentials
+  // Otherwise, show Login page or Bettercode login
   return (
     <ErrorBoundary>
       <Routes>
-        <Route path="/test-credentials" element={<TestCredentials />} />
-        <Route path="/firebase-test" element={<FirebaseTest />} />
         <Route path="/bettercode" element={
           <Suspense fallback={<LoadingSpinner />}>
             <BettercodeLogin />

@@ -8,17 +8,16 @@ import cors from "cors";
 import { reminderScheduler } from "./services/reminderScheduler";
 import { initializeFirebaseAdmin } from "./firebaseConfig";
 
-console.log("Env vars:", {
+console.log("Env check:", {
   NODE_ENV: process.env.NODE_ENV,
-  GOOGLE_API_KEY: process.env.GOOGLE_API_KEY ? "✅ Set" : "❌ Missing",
-  FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID ? "✅ Set" : "❌ Missing",
+  GOOGLE_API_KEY: process.env.GOOGLE_API_KEY ? "Set" : "Missing",
+  FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID ? "Set" : "Missing",
 });
 
-// Only log success if key is present
 if (process.env.GOOGLE_API_KEY) {
-  console.info("✅ Firebase API key loaded successfully.");
-} else {
-  console.warn("❌ Firebase API key missing - using mock data fallback");
+  console.info("Firebase API key loaded.");
+} else if (process.env.NODE_ENV === 'production') {
+  console.warn("Firebase API key missing in production.");
 }
 
 const app = express();
@@ -88,11 +87,10 @@ app.use((req, res, next) => {
     if (firebaseAdmin) {
       console.log('✅ Firebase Admin initialized successfully');
     } else {
-      console.log('⚠️ Firebase Admin initialization failed, will use mock data fallback');
+      console.warn('Firebase Admin initialization failed.');
     }
   } catch (error) {
-    console.error('❌ Firebase Admin initialization error:', error);
-    console.log('⚠️ Will use mock data fallback for login sessions');
+    console.error('Firebase Admin initialization error:', error);
   }
 
   // Enable if you need reminder scheduler later

@@ -342,12 +342,25 @@ class CentreDataStore {
     this.notify();
 
     if (this.nestMode) {
-      void this.refreshFromNest();
-      this.nestPollTimer = setInterval(() => {
-        void this.refreshFromNest({ silent: true });
-      }, 60_000);
+      void this.refreshFromNest().then((ok) => {
+        if (ok) {
+          this.nestPollTimer = setInterval(() => {
+            void this.refreshFromNest({ silent: true });
+          }, 60_000);
+          return;
+        }
+        console.warn('CentreDataStore: Nest API unavailable — using Firestore for leads');
+        this.nestMode = false;
+        this.startFirestoreSync();
+      });
       return;
     }
+
+    this.startFirestoreSync();
+  }
+
+  private startFirestoreSync() {
+    if (this.unsubscribe) return;
 
     this.unsubscribe = firebaseListenerManager.subscribe(
       'leads',
@@ -358,11 +371,26 @@ class CentreDataStore {
     );
 
     this.subscribeRecentEnquiries();
-
-    void this.refresh();
+    void this.refreshFirestore();
   }
 
-  private async refreshFromNest(options?: { silent?: boolean }): Promise<void> {
+  private async refreshFirestore(): Promise<void> {
+    if (!db || !this.centreId) return;
+
+    try {
+      const [leadDocs, enquiryDocs] = await Promise.all([
+        fetchAllLeadDocuments(),
+        fetchAllEnquiryDocuments(),
+      ]);
+      this.leadDocs = leadDocs;
+      this.enquiryDocs = enquiryDocs;
+      this.recomputeLeads();
+    } catch (error) {
+      console.error('CentreDataStore refresh failed:', error);
+    }
+  }
+
+  private async refreshFromNest(options?: { silent?: boolean }): Promise<boolean> {
     if (!options?.silent) {
       this.loading = true;
       this.notify();
@@ -379,12 +407,13 @@ class CentreDataStore {
           page,
           limit: pageSize,
         });
+        const items = result?.items ?? [];
         collected.push(
-          ...result.items.map((item) =>
+          ...items.map((item) =>
             mapNestLeadToUi(item as Parameters<typeof mapNestLeadToUi>[0]),
           ),
         );
-        totalPages = result.meta.totalPages || 1;
+        totalPages = result?.meta?.totalPages || 1;
         page += 1;
       }
 
@@ -396,34 +425,32 @@ class CentreDataStore {
       this.hasSnapshot = true;
       this.lastUpdate = new Date();
       this.notify();
+      return true;
     } catch (error) {
-      console.error('CentreDataStore Nest refresh failed:', error);
+      console.warn('CentreDataStore Nest refresh failed:', error);
       this.loading = false;
       this.notify();
-      throw error;
+      return false;
     }
   }
 
   async refresh(): Promise<void> {
-    if (this.nestMode || isNestLeadsEnabled()) {
-      this.nestMode = true;
-      await this.refreshFromNest();
-      return;
+    if (this.nestMode && isNestLeadsEnabled()) {
+      const ok = await this.refreshFromNest();
+      if (ok) return;
+
+      console.warn('CentreDataStore: Nest refresh failed — falling back to Firestore');
+      this.nestMode = false;
+      if (this.nestPollTimer) {
+        clearInterval(this.nestPollTimer);
+        this.nestPollTimer = null;
+      }
+      if (!this.unsubscribe) {
+        this.startFirestoreSync();
+      }
     }
 
-    if (!db || !this.centreId) return;
-
-    try {
-      const [leadDocs, enquiryDocs] = await Promise.all([
-        fetchAllLeadDocuments(),
-        fetchAllEnquiryDocuments(),
-      ]);
-      this.leadDocs = leadDocs;
-      this.enquiryDocs = enquiryDocs;
-      this.recomputeLeads();
-    } catch (error) {
-      console.error('CentreDataStore refresh failed:', error);
-    }
+    await this.refreshFirestore();
   }
 
   patchLead(leadId: string, updates: Partial<LeadRecord>) {
@@ -442,6 +469,21 @@ class CentreDataStore {
     this.leads = typeof updater === 'function' ? updater(this.leads) : updater;
     this.lastUpdate = new Date();
     this.notify();
+  }
+
+  /** Insert or update a lead in local cache (e.g. immediately after Firestore create). */
+  upsertLead(lead: LeadRecord) {
+    const id = String(lead.id);
+    const normalized = normalizeLead(lead as Record<string, unknown> & { id: string });
+    const docIndex = this.leadDocs.findIndex((entry) => String(entry.id) === id);
+
+    if (docIndex >= 0) {
+      this.leadDocs[docIndex] = { ...this.leadDocs[docIndex], ...normalized };
+    } else {
+      this.leadDocs = [normalized, ...this.leadDocs];
+    }
+
+    this.recomputeLeads();
   }
 
   cleanup() {
