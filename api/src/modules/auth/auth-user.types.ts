@@ -15,4 +15,6 @@ export interface AuthUser {
   approved: boolean;
   isActive: boolean;
   isDirector: boolean;
+  permissionsGranted: string[];
+  permissionsRevoked: string[];
 }

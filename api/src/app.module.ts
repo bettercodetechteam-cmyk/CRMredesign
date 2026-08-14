@@ -12,11 +12,13 @@ import { validateEnvironment } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
 import { BatchesModule } from './modules/batches/batches.module';
 import { CoursesModule } from './modules/courses/courses.module';
+import { CrmRecordsModule } from './modules/crm-records/crm-records.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { FeesModule } from './modules/fees/fees.module';
 import { HealthModule } from './modules/health/health.module';
 import { LeadsModule } from './modules/leads/leads.module';
 import { StudentsModule } from './modules/students/students.module';
+import { TasksModule } from './modules/tasks/tasks.module';
 import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
 
@@ -39,7 +41,9 @@ import { PrismaModule } from './prisma/prisma.module';
     LeadsModule,
     StudentsModule,
     FeesModule,
+    CrmRecordsModule,
     DashboardModule,
+    TasksModule,
   ],
   providers: [
     {

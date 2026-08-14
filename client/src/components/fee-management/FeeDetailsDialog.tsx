@@ -31,7 +31,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import { 
-  Printer, 
   Download, 
   CheckCircle, 
   XCircle, 
@@ -57,6 +56,8 @@ import {
   receiptNumberMatchesBrand,
 } from '@/lib/receiptCounterService';
 import { createGstRecordIfNotExists, deleteGstRecordByReceipt } from '@/lib/gstRecordService';
+import { patchFeeRecord } from '@/lib/feeRecordPersistence';
+import { openReceiptPage } from '@/lib/feeReceiptUtils';
 import { INSTALLMENT_AMOUNT_FIELDS, INSTALLMENT_RECEIPT_FIELDS, INSTALLMENT_DUE_DATE_FIELDS, INSTALLMENT_LATE_FEES_FIELDS, INSTALLMENT_PAYMENT_MODE_FIELDS, MAX_INSTALLMENTS } from '@/constants/feeInstallments';
 import {
   getResolvedInstallmentDueDate,
@@ -440,9 +441,7 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
           
           try {
             await removeGstForPayment(existingReceipt);
-
-            const { updateDoc, doc } = await import('firebase/firestore');
-            await updateDoc(doc(db, 'fees', record.id), firestoreUpdates);
+            await patchFeeRecord(record.id, firestoreUpdates);
           } catch (error) {
             console.error('Failed to mark installment as unpaid:', error);
             toast({ title: "Error", description: "Failed to update payment status", variant: "destructive" });
@@ -516,8 +515,7 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
             await removeGstForPayment(existingReceipt);
           }
 
-          const { updateDoc, doc } = await import('firebase/firestore');
-          await updateDoc(doc(db, 'fees', record.id), firestoreUpdates);
+          await patchFeeRecord(record.id, firestoreUpdates);
         } catch (error) {
           console.error('Failed to mark initial payment as unpaid:', error);
           toast({ title: "Error", description: "Failed to update payment status", variant: "destructive" });
@@ -576,7 +574,6 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
     if (!valueToSave) return;
 
     try {
-      const { updateDoc, doc } = await import('firebase/firestore');
       const updates: Record<string, string> = {};
 
       // Always cascade: use current edited date as base, then same day +1 month for each remaining installment
@@ -597,7 +594,7 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
         updates[INSTALLMENT_DUE_DATE_FIELDS[i]] = `${y}-${m}-${day}`;
       }
 
-      await updateDoc(doc(db, 'fees', record.id), updates);
+      await patchFeeRecord(record.id, updates);
       const updatedRecord = { ...record, ...updates };
       onUpdate(updatedRecord);
       const count = totalInstallments - installmentIndex;
@@ -779,6 +776,17 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
         receiptType: 'registration',
         feesPaidDate: feesPaidDateToSave,
       });
+      setTimeout(() => {
+        openReceiptPage(
+          record.id,
+          'registration',
+          amount,
+          {
+            ...(updatedRecord as Record<string, unknown>),
+            feesPaidDate: feesPaidDateToSave,
+          },
+        );
+      }, 400);
       setPaymentDialog({ isOpen: false, data: null, installmentIndex: undefined, installmentAmount: undefined });
       setIsProcessingPayment(false);
       return;
@@ -857,72 +865,56 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
       // This ensures the receipt number is persisted before onUpdate is called
       if ((updatedRecord as any)[receiptField] && (updatedRecord as any)[receiptField] !== '-') {
         try {
-          const { updateDoc, doc, getDoc } = await import('firebase/firestore');
-          
-          // Double-check: Verify this receipt number isn't already used in another field
-          const feeDocRef = doc(db, 'fees', record.id);
-          const feeDocSnap = await getDoc(feeDocRef);
-          
-          if (feeDocSnap.exists()) {
-            const currentFeeData = feeDocSnap.data();
-            const newReceiptNumber = (updatedRecord as any)[receiptField];
-            
-            // Check all receipt fields to ensure uniqueness
-            const allReceiptFields = [
-              'registrationReceiptNumber', 'receiptNumber', 'fullPaymentReceiptNumber',
-              'installment01ReceiptNumber', 'installment02ReceiptNumber', 'installment03ReceiptNumber',
-              'installment04ReceiptNumber', 'installment05ReceiptNumber', 'installment06ReceiptNumber',
-              'installment07ReceiptNumber', 'installment08ReceiptNumber', 'installment09ReceiptNumber',
-              'installment10ReceiptNumber', 'installment11ReceiptNumber', 'installment12ReceiptNumber'
-            ];
-            
-            let isDuplicate = false;
-            for (const field of allReceiptFields) {
-              if (field !== receiptField && currentFeeData[field] === newReceiptNumber) {
-                console.error('❌ DUPLICATE DETECTED! Receipt number', newReceiptNumber, 'already exists in field', field);
-                isDuplicate = true;
-                break;
-              }
-            }
-            
-            if (isDuplicate) {
-              // Regenerate receipt number - this shouldn't happen but handle it
-              console.warn('⚠️ Regenerating receipt number due to duplicate in database...');
-              const resolved = await resolveOrGenerateReceiptNumber(db, record.id, receiptType, recordForReceipt);
-              (updatedRecord as any)[receiptField] = resolved.receiptNumber;
-              await updateDoc(feeDocRef, {
-                [receiptField]: resolved.receiptNumber
-              });
-              console.log('✅ Regenerated and saved NEW receipt number:', resolved.receiptNumber, 'in field:', receiptField);
-            } else {
-              // Save the receipt number AND installment amount together (and late fees if applied). Include paymentMode/chequeNumber so receipt shows selected mode.
-              const installmentAmountToSave = updatedRecord[currentInstallmentField] || installmentAmount;
-              const updateData: Record<string, unknown> = {
-                [receiptField]: newReceiptNumber,
-                [currentInstallmentField]: installmentAmountToSave,
-                feesPaid: newFeesPaid,
-                feesBalance: Math.max(0, record.discountedFees - newFeesPaid),
-                installmentDetails: (record.installmentDetails || '') + newRemarkEntry,
-                balanceInstallments: record.balanceInstallments && record.balanceInstallments > 0 ? record.balanceInstallments - 1 : record.balanceInstallments,
-                paymentMode: paymentMode || record.paymentMode || 'Cash',
-                chequeNumber: paymentMode === 'Cheque' ? (paymentDialog.data?.chequeNumber ?? (record as any).chequeNumber ?? '') : ((record as any).chequeNumber ?? ''),
-                [INSTALLMENT_PAYMENT_MODE_FIELDS[installmentIndex]]: paymentMode || 'Cash',
-                feesPaidDate: feesPaidDateToSave
-              };
-              if (lateFeesAmount > 0) {
-                updateData[INSTALLMENT_LATE_FEES_FIELDS[installmentIndex]] = lateFeesAmount;
-              }
-              await updateDoc(feeDocRef, updateData);
-              console.log('💾 Saved receipt number and installment amount to Firestore:', {
-                receiptNumber: newReceiptNumber,
-                field: receiptField,
-                installmentAmount: installmentAmountToSave,
-                installmentField: currentInstallmentField
-              });
+          const currentFeeData = record as Record<string, unknown>;
+          const newReceiptNumber = (updatedRecord as any)[receiptField];
+
+          const allReceiptFields = [
+            'registrationReceiptNumber', 'receiptNumber', 'fullPaymentReceiptNumber',
+            ...INSTALLMENT_RECEIPT_FIELDS,
+          ];
+
+          let isDuplicate = false;
+          for (const field of allReceiptFields) {
+            if (field !== receiptField && currentFeeData[field] === newReceiptNumber) {
+              console.error('❌ DUPLICATE DETECTED! Receipt number', newReceiptNumber, 'already exists in field', field);
+              isDuplicate = true;
+              break;
             }
           }
+
+          if (isDuplicate) {
+            console.warn('⚠️ Regenerating receipt number due to duplicate in database...');
+            const resolved = await resolveOrGenerateReceiptNumber(db, record.id, receiptType, recordForReceipt);
+            (updatedRecord as any)[receiptField] = resolved.receiptNumber;
+            await patchFeeRecord(record.id, { [receiptField]: resolved.receiptNumber });
+            console.log('✅ Regenerated and saved NEW receipt number:', resolved.receiptNumber, 'in field:', receiptField);
+          } else {
+            const installmentAmountToSave = updatedRecord[currentInstallmentField] || installmentAmount;
+            const updateData: Record<string, unknown> = {
+              [receiptField]: newReceiptNumber,
+              [currentInstallmentField]: installmentAmountToSave,
+              feesPaid: newFeesPaid,
+              feesBalance: Math.max(0, record.discountedFees - newFeesPaid),
+              installmentDetails: (record.installmentDetails || '') + newRemarkEntry,
+              balanceInstallments: record.balanceInstallments && record.balanceInstallments > 0 ? record.balanceInstallments - 1 : record.balanceInstallments,
+              paymentMode: paymentMode || record.paymentMode || 'Cash',
+              chequeNumber: paymentMode === 'Cheque' ? (paymentDialog.data?.chequeNumber ?? (record as any).chequeNumber ?? '') : ((record as any).chequeNumber ?? ''),
+              [INSTALLMENT_PAYMENT_MODE_FIELDS[installmentIndex]]: paymentMode || 'Cash',
+              feesPaidDate: feesPaidDateToSave
+            };
+            if (lateFeesAmount > 0) {
+              updateData[INSTALLMENT_LATE_FEES_FIELDS[installmentIndex]] = lateFeesAmount;
+            }
+            await patchFeeRecord(record.id, updateData);
+            console.log('💾 Saved receipt number and installment amount:', {
+              receiptNumber: newReceiptNumber,
+              field: receiptField,
+              installmentAmount: installmentAmountToSave,
+              installmentField: currentInstallmentField
+            });
+          }
         } catch (error) {
-          console.error('❌ Failed to save receipt number to Firestore:', error);
+          console.error('❌ Failed to save receipt number:', error);
         }
       }
       
@@ -959,14 +951,19 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
         receiptType: receiptType,
         feesPaidDate: feesPaidDateToSave
       });
-      
-      // Auto-generate receipt for full installment - DISABLED FOR NOW
-      // setTimeout(() => {
-      //   const feeId = record.id;
-      //   const installmentNum = (installmentIndex + 1).toString().padStart(2, '0');
-      //   // Pass the installment amount in the URL for receipt generation
-      //   window.open(`/receipt?feeId=${feeId}&type=installment${installmentNum}&amount=${amount}`, '_blank');
-      // }, 500);
+
+      setTimeout(() => {
+        const installmentNum = (installmentIndex + 1).toString().padStart(2, '0');
+        openReceiptPage(
+          record.id,
+          `installment${installmentNum}`,
+          totalAmount,
+          {
+            ...(updatedRecord as Record<string, unknown>),
+            feesPaidDate: feesPaidDateToSave,
+          },
+        );
+      }, 400);
       
     } else {
       // Partial payment OR different amount - redistribute remaining balance among UNPAID installments only
@@ -1096,11 +1093,10 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
             console.log('✅ Generated NEW receipt number:', resolved.receiptNumber, 'for field:', receiptField);
             
             // Save receipt number AND installment amount to Firestore together
-            const { updateDoc, doc } = await import('firebase/firestore');
             const currentInstallmentField = INSTALLMENT_AMOUNT_FIELDS[installmentIndex];
             const installmentAmountToSave = updatedRecord[currentInstallmentField] || installmentAmount;
-            
-            await updateDoc(doc(db, 'fees', record.id), {
+
+            await patchFeeRecord(record.id, {
               [receiptField]: resolved.receiptNumber,
               [currentInstallmentField]: installmentAmountToSave,
               paymentMode: paymentMode || record.paymentMode || 'Cash',
@@ -1604,12 +1600,12 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                             <Button 
                               size="sm" 
                               variant="outline" 
-                              title="Download Receipt"
+                              title="Download fee receipt as PDF"
                               disabled={row.status !== 'Paid' || generatingReceipt === row.name}
                               onClick={async () => {
                                 const feeId = record.id;
                                 let receiptType = '';
-                                let amount = row.amount;
+                                const amount = row.amount;
 
                                 if (row.index !== undefined && row.index >= 0) {
                                   const installmentNum = (row.index + 1).toString().padStart(2, '0');
@@ -1620,7 +1616,6 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                   receiptType = 'onetime';
                                 }
 
-                                // Prevent double-clicks
                                 if (generatingReceipt === row.name) {
                                   return;
                                 }
@@ -1632,22 +1627,19 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                     feesPaidDate: normalizeFeesPaidDate(record),
                                   };
                                   
-                                  // For installments, always generate a NEW receipt number if one doesn't exist
-                                  // Each installment payment should have its own unique receipt number
                                   let receiptNumber = '';
+                                  let feeDataForReceipt: Record<string, unknown> = { ...receiptContext };
                                   
                                   if (row.index !== undefined && row.index >= 0) {
                                     const existingReceipt = (record as any)[INSTALLMENT_RECEIPT_FIELDS[row.index]] || '';
                                     
                                     if (isReusableReceiptForRecord(receiptContext, existingReceipt)) {
                                       receiptNumber = existingReceipt;
-                                      console.log('✅ Using existing receipt number for installment:', receiptNumber);
+                                      feeDataForReceipt[INSTALLMENT_RECEIPT_FIELDS[row.index]] = receiptNumber;
                                     } else {
-                                      console.log('🆕 Generating NEW receipt number for installment', row.index + 1, '...');
-                                      console.log('📋 Receipt type:', receiptType, 'Field:', INSTALLMENT_RECEIPT_FIELDS[row.index]);
-                                      
                                       const resolved = await resolveOrGenerateReceiptNumber(db, feeId, receiptType, receiptContext);
                                       receiptNumber = resolved.receiptNumber;
+                                      feeDataForReceipt = { ...resolved.feeData };
                                       
                                       if (!isUsableReceiptNumber(receiptNumber)) {
                                         throw new Error('Failed to generate valid receipt number');
@@ -1660,7 +1652,6 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                         if (i !== row.index) {
                                           const otherReceipt = (record as any)[INSTALLMENT_RECEIPT_FIELDS[i]];
                                           if (otherReceipt === receiptNumber) {
-                                            console.error('❌ DUPLICATE DETECTED! Receipt number', receiptNumber, 'already exists in field', INSTALLMENT_RECEIPT_FIELDS[i]);
                                             isDuplicate = true;
                                             break;
                                           }
@@ -1668,19 +1659,15 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                       }
                                       
                                       if (isDuplicate) {
-                                        // Regenerate - this shouldn't happen but handle it
-                                        console.warn('⚠️ Regenerating receipt number due to duplicate...');
                                         const resolved2 = await resolveOrGenerateReceiptNumber(db, feeId, receiptType, receiptContext);
                                         receiptNumber = resolved2.receiptNumber;
+                                        feeDataForReceipt = { ...resolved2.feeData };
                                       }
                                       
-                                      // Save the receipt number to Firestore in the SPECIFIC field
-                                      const { updateDoc, doc } = await import('firebase/firestore');
-                                      await updateDoc(doc(db, 'fees', feeId), {
+                                      await patchFeeRecord(feeId, {
                                         [receiptField]: receiptNumber
                                       });
-                                      
-                                      console.log('✅ Generated and saved NEW receipt number:', receiptNumber, 'for field:', receiptField, 'installment:', row.index + 1);
+                                      feeDataForReceipt[receiptField] = receiptNumber;
                                     }
                                   } else if (row.index === -2) {
                                     const existingReceipt = record.registrationReceiptNumber || record.receiptNumber || '';
@@ -1690,21 +1677,21 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                     } else {
                                       const resolved = await resolveOrGenerateReceiptNumber(db, feeId, 'registration', receiptContext);
                                       receiptNumber = resolved.receiptNumber;
-                                      const { updateDoc, doc } = await import('firebase/firestore');
-                                      await updateDoc(doc(db, 'fees', feeId), {
+                                      feeDataForReceipt = { ...resolved.feeData };
+                                      await patchFeeRecord(feeId, {
                                         registrationReceiptNumber: receiptNumber,
                                         receiptNumber,
                                       });
                                     }
+                                    feeDataForReceipt.registrationReceiptNumber = receiptNumber;
+                                    feeDataForReceipt.receiptNumber = receiptNumber;
                                   } else {
-                                    // One Time Fee or other non-installment payment
                                     if (isReusableReceiptForRecord(receiptContext, row.receiptNumber)) {
                                       receiptNumber = row.receiptNumber;
-                                      console.log('✅ Used existing receipt number:', receiptNumber);
                                     } else {
-                                      console.log('⚠️ Receipt number missing, attempting to resolve/generate...');
                                       const resolved = await resolveOrGenerateReceiptNumber(db, feeId, receiptType, receiptContext);
                                       receiptNumber = resolved.receiptNumber;
+                                      feeDataForReceipt = { ...resolved.feeData };
                                     }
                                   }
                                   
@@ -1725,6 +1712,7 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                     const updatedRecord = { ...record } as FeeRecord;
                                     if (row.index !== undefined && row.index >= 0) {
                                       (updatedRecord as Record<string, unknown>)[INSTALLMENT_RECEIPT_FIELDS[row.index]] = receiptNumber;
+                                      feeDataForReceipt[INSTALLMENT_RECEIPT_FIELDS[row.index]] = receiptNumber;
                                     } else if (row.index === -2) {
                                       updatedRecord.registrationReceiptNumber = receiptNumber;
                                       updatedRecord.receiptNumber = receiptNumber;
@@ -1735,13 +1723,7 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                                     onUpdate(updatedRecord);
                                   }
 
-                                  const loadKey = `${feeId}|${receiptType}|${String(amount)}`;
-                                  sessionStorage.setItem(
-                                    `receiptDraft:${loadKey}`,
-                                    JSON.stringify({ feeData: { ...record, receiptNumber } })
-                                  );
-                                  
-                                  window.open(`/receipt?feeId=${feeId}&type=${receiptType}&amount=${amount}`, '_blank');
+                                  openReceiptPage(feeId, receiptType, amount, feeDataForReceipt, { autoDownload: true });
                                 } catch (error: any) {
                                   console.error('Error generating receipt:', error);
                                   toast({
@@ -1757,9 +1739,9 @@ export default function FeeDetailsDialog({ isOpen, onClose, record, onUpdate, ch
                               {generatingReceipt === row.name ? (
                                 <Loader2 className="w-4 h-4 mr-1 animate-spin" />
                               ) : (
-                                <Printer className="w-4 h-4 mr-1" />
+                                <Download className="w-4 h-4 mr-1" />
                               )}
-                              Receipt
+                              PDF
                             </Button>
                           </div>
                         </TableCell>

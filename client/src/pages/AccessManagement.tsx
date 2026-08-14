@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { collection, getDocs } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
 import { usePermissions } from '@/hooks/usePermissions';
 import { Navigate } from 'react-router-dom';
 import { Shield, Save, RefreshCw } from 'lucide-react';
@@ -26,8 +24,9 @@ import {
   getRoleDefaultPermissions,
   normalizeRole,
 } from '@shared/permissions';
-import { updateUserAccess, migrateKnownUsers } from '@/lib/iamService';
+import { updateUserAccess } from '@/lib/iamService';
 import { ROLE_NAMES } from '@/lib/types';
+import { nestUsersApi } from '@/services/nest/usersApi';
 
 interface CrmUser {
   id: string;
@@ -50,7 +49,6 @@ export default function AccessManagement() {
   const [users, setUsers] = useState<CrmUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
-  const [migrating, setMigrating] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, {
     role: string;
     permissionsGranted: ModulePermission[];
@@ -58,13 +56,18 @@ export default function AccessManagement() {
   }>>({});
 
   const loadUsers = async () => {
-    if (!db) return;
     setLoading(true);
     try {
-      const snapshot = await getDocs(collection(db, 'users'));
-      const list = snapshot.docs.map((docSnap) => ({
-        id: docSnap.id,
-        ...(docSnap.data() as Omit<CrmUser, 'id'>),
+      const result = await nestUsersApi.list({ limit: 200 });
+      const list = result.items.map((user) => ({
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName ?? '',
+        email: user.email,
+        role: user.role,
+        approved: user.approved,
+        permissionsGranted: user.permissionsGranted as ModulePermission[],
+        permissionsRevoked: user.permissionsRevoked as ModulePermission[],
       }));
       setUsers(list);
       const nextDrafts: typeof drafts = {};
@@ -158,26 +161,6 @@ export default function AccessManagement() {
     }
   };
 
-  const handleMigrate = async () => {
-    setMigrating(true);
-    try {
-      const result = await migrateKnownUsers();
-      toast({
-        title: 'Migration complete',
-        description: `Updated ${result.updated} user(s).`,
-      });
-      await loadUsers();
-    } catch (error: unknown) {
-      toast({
-        title: 'Migration failed',
-        description: error instanceof Error ? error.message : 'Could not run migration.',
-        variant: 'destructive',
-      });
-    } finally {
-      setMigrating(false);
-    }
-  };
-
   return (
     <div className="space-y-6 p-4 sm:p-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -194,9 +177,6 @@ export default function AccessManagement() {
           <Button variant="outline" onClick={loadUsers} disabled={loading}>
             <RefreshCw className="w-4 h-4 mr-2" />
             Refresh
-          </Button>
-          <Button onClick={handleMigrate} disabled={migrating}>
-            {migrating ? <InlineLoading size="sm" color="primary" /> : 'Run Email Migration'}
           </Button>
         </div>
       </div>

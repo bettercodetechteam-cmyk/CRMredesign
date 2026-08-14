@@ -428,11 +428,33 @@ export class AuthService {
     options?: { firstName?: string; lastName?: string }
   ) {
     try {
+      const { bootstrapPostgresUser } = await import('./postgresBootstrap');
+      const postgresResult = await bootstrapPostgresUser({
+        firebaseUid: uid,
+        email,
+        firstName: options?.firstName,
+        lastName: options?.lastName,
+      });
+      if (!postgresResult.success) {
+        return {
+          success: false,
+          message:
+            postgresResult.message ||
+            'Failed to provision CRM database profile (PostgreSQL)',
+        };
+      }
+
       const adminBundle = await getFirebaseAdmin();
       if (!adminBundle?.adminDb) {
         return {
-          success: false,
-          message: 'Firebase Admin is not configured on the server',
+          success: true,
+          created: postgresResult.created,
+          data: {
+            uid,
+            email: normalizeEmail(email) || email,
+            centreId: postgresResult.centreId,
+            postgresUserId: postgresResult.userId,
+          },
         };
       }
 
@@ -456,7 +478,7 @@ export class AuthService {
           patch.role = migratedRole;
         }
         if (!data.centreId) {
-          patch.centreId = 'default-centre';
+          patch.centreId = postgresResult.centreId || 'default-centre';
         }
 
         if (Object.keys(patch).length > 1) {
@@ -479,10 +501,11 @@ export class AuthService {
         firstName: options?.firstName || 'User',
         lastName: options?.lastName || '',
         role,
-        centreId: 'default-centre',
+        centreId: postgresResult.centreId || 'default-centre',
         approved,
         permissionsGranted: [],
         permissionsRevoked: [],
+        postgresUserId: postgresResult.userId,
         createdAt: now,
         updatedAt: now,
       };
@@ -497,9 +520,21 @@ export class AuthService {
       };
     } catch (error: unknown) {
       console.error('Error bootstrapping user profile:', error);
+      const message =
+        error instanceof AggregateError
+          ? error.errors?.[0] instanceof Error
+            ? error.errors[0].message.includes('ECONNREFUSED')
+              ? 'PostgreSQL is not running. Start Docker Desktop, then run: npm run db:up'
+              : error.errors[0].message
+            : 'Failed to bootstrap user profile'
+          : error instanceof Error
+            ? error.message.includes('ECONNREFUSED')
+              ? 'PostgreSQL is not running. Start Docker Desktop, then run: npm run db:up'
+              : error.message
+            : 'Failed to bootstrap user profile';
       return {
         success: false,
-        message: error instanceof Error ? error.message : 'Failed to bootstrap user profile',
+        message,
       };
     }
   }

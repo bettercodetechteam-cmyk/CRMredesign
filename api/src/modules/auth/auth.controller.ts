@@ -7,6 +7,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+import { AllowPending } from '../../common/decorators/allow-pending.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 import { AuthUser } from './auth-user.types';
@@ -16,6 +17,7 @@ import { AuthUser } from './auth-user.types';
 @Controller('auth')
 export class AuthController {
   @Get('me')
+  @AllowPending()
   @ApiOperation({
     summary: 'Return the authenticated CRM user (Firebase token → Postgres profile)',
   })

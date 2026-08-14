@@ -343,20 +343,22 @@ class CentreDataStore {
 
     if (this.nestMode) {
       void this.refreshFromNest().then((ok) => {
-        if (ok) {
-          this.nestPollTimer = setInterval(() => {
-            void this.refreshFromNest({ silent: true });
-          }, 60_000);
+        if (!ok) {
+          console.error('CentreDataStore: PostgreSQL leads API unavailable');
+          this.loading = false;
+          this.notify();
           return;
         }
-        console.warn('CentreDataStore: Nest API unavailable — using Firestore for leads');
-        this.nestMode = false;
-        this.startFirestoreSync();
+        this.nestPollTimer = setInterval(() => {
+          void this.refreshFromNest({ silent: true });
+        }, 60_000);
       });
       return;
     }
 
-    this.startFirestoreSync();
+    console.error('CentreDataStore: PostgreSQL storage is required but Nest leads API is disabled');
+    this.loading = false;
+    this.notify();
   }
 
   private startFirestoreSync() {
@@ -436,21 +438,18 @@ class CentreDataStore {
 
   async refresh(): Promise<void> {
     if (this.nestMode && isNestLeadsEnabled()) {
-      const ok = await this.refreshFromNest();
-      if (ok) return;
-
-      console.warn('CentreDataStore: Nest refresh failed — falling back to Firestore');
-      this.nestMode = false;
-      if (this.nestPollTimer) {
-        clearInterval(this.nestPollTimer);
-        this.nestPollTimer = null;
-      }
-      if (!this.unsubscribe) {
-        this.startFirestoreSync();
-      }
+      await this.refreshFromNest();
+      return;
     }
 
-    await this.refreshFirestore();
+    console.error('CentreDataStore: PostgreSQL leads API is not available');
+  }
+
+  /** Non-blocking refresh — use after create/update instead of awaiting full list reload. */
+  refreshInBackground(): void {
+    if (this.nestMode && isNestLeadsEnabled()) {
+      void this.refreshFromNest({ silent: true });
+    }
   }
 
   patchLead(leadId: string, updates: Partial<LeadRecord>) {

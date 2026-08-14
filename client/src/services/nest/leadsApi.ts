@@ -1,4 +1,5 @@
 import { nestApi } from '@/lib/nestApi';
+import { isValidNestPhone, normalizeNestPhone } from '@/lib/nestLeadMapper';
 
 export interface NestPaginated<T> {
   items: T[];
@@ -69,4 +70,20 @@ export const nestLeadsApi = {
       `/leads/${id}/convert`,
       body ?? {},
     ),
+
+  remove: (id: string) => nestApi.delete<{ success: boolean; id: string }>(`/leads/${id}`),
+
+  /** Exact phone match within a centre (for duplicate-safe create/update). */
+  findByPhone: async (centreId: string, phone: string): Promise<NestLead | null> => {
+    const normalized = normalizeNestPhone(phone);
+    if (!isValidNestPhone(normalized)) return null;
+    const result = await nestApi.get<NestPaginated<NestLead>>('/leads', {
+      centreId,
+      search: normalized,
+      limit: 100,
+    });
+    return (
+      result.items?.find((lead) => normalizeNestPhone(lead.phone) === normalized) ?? null
+    );
+  },
 };

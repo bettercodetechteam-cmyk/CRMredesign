@@ -36,6 +36,8 @@ export function setupSwagger(app: INestApplication): void {
       .addTag('fees', 'Fee plans, payments and receipts')
       .addTag('dashboard', 'Director and centre analytics')
       .addTag('courses', 'Course catalogue and roll prefixes')
+      .addTag('users', 'Staff access, approvals and assignees')
+      .addTag('tasks', 'Director-assigned work and follow-up')
       .build(),
   );
 

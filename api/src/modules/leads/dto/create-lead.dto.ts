@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { LeadSource, LeadStatus } from '@prisma/client';
+import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsEnum,
@@ -11,8 +12,21 @@ import {
   MinLength,
 } from 'class-validator';
 
+function normalizePhoneInput(value: unknown): string {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+
+function normalizeFirstNameInput(value: unknown): string {
+  const trimmed = String(value ?? '').trim();
+  if (trimmed.length >= 2) return trimmed;
+  if (trimmed.length === 1) return `${trimmed}.`;
+  return trimmed;
+}
+
 export class CreateLeadDto {
   @ApiProperty({ example: 'Riya' })
+  @Transform(({ value }) => normalizeFirstNameInput(value))
   @IsString()
   @MinLength(2)
   @MaxLength(80)
@@ -25,6 +39,7 @@ export class CreateLeadDto {
   lastName?: string;
 
   @ApiProperty({ example: '9876543210', description: 'Indian 10-digit mobile' })
+  @Transform(({ value }) => normalizePhoneInput(value))
   @IsString()
   @Matches(/^[6-9][0-9]{9}$/, {
     message: 'phone must be a valid 10-digit Indian mobile number',
@@ -32,6 +47,11 @@ export class CreateLeadDto {
   phone!: string;
 
   @ApiPropertyOptional({ example: 'riya@example.com' })
+  @Transform(({ value }) => {
+    if (value === undefined || value === null) return undefined;
+    const trimmed = String(value).trim();
+    return trimmed === '' ? undefined : trimmed.toLowerCase();
+  })
   @IsOptional()
   @IsEmail()
   @MaxLength(160)

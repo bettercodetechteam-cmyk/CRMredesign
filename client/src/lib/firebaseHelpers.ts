@@ -4,6 +4,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, auth, storage } from './firebase';
 import { uploadFileToStorage } from './uploadService';
 import { firebaseCache } from './firebaseCache';
+import { isPostgresPrimary } from './nestApi';
 
 // Connection management
 let isConnected = true;
@@ -112,6 +113,24 @@ export const firebaseHelpers = {
 
   // Student management
   async saveStudent(studentData: any) {
+    if (isPostgresPrimary()) {
+      try {
+        const { createNestStudent, createNestStudentFromLead } = await import('./nestStudentMapper');
+        const id = studentData.leadId
+          ? await createNestStudentFromLead(
+              String(studentData.leadId),
+              studentData,
+              studentData.centreId,
+            )
+          : await createNestStudent(studentData, studentData.centreId);
+        firebaseCache.invalidatePattern('students');
+        return id;
+      } catch (error) {
+        console.error('❌ Error saving student to PostgreSQL:', error);
+        return null;
+      }
+    }
+
     if (!db) return null;
     try {
       const result = await retryOperation(async () => {
@@ -207,6 +226,16 @@ export const firebaseHelpers = {
   },
 
   async getStudents(centreId?: string) {
+    if (isPostgresPrimary()) {
+      try {
+        const { fetchAllNestStudents } = await import('./nestStudentMapper');
+        return await fetchAllNestStudents(centreId);
+      } catch (error) {
+        console.error('❌ Error fetching students from PostgreSQL:', error);
+        return [];
+      }
+    }
+
     if (!db) {
       console.error('❌ Database not initialized');
       return [];
@@ -292,6 +321,16 @@ export const firebaseHelpers = {
 
   /** Fetch a single student by id from Firestore (no cache) - use for edit form to get latest email, parentsContactNumber, etc. */
   async getStudentById(id: string): Promise<Record<string, unknown> | null> {
+    if (isPostgresPrimary()) {
+      try {
+        const { getNestStudentById } = await import('./nestStudentMapper');
+        return await getNestStudentById(id);
+      } catch (error) {
+        console.error('❌ Error fetching student from PostgreSQL:', error);
+        return null;
+      }
+    }
+
     if (!db || !id) return null;
     try {
       const docRef = doc(db, 'students', id);
@@ -315,6 +354,16 @@ export const firebaseHelpers = {
   },
 
   async getAllStudents() {
+    if (isPostgresPrimary()) {
+      try {
+        const { fetchAllNestStudents } = await import('./nestStudentMapper');
+        return await fetchAllNestStudents();
+      } catch (error) {
+        console.error('❌ Error fetching all students from PostgreSQL:', error);
+        return [];
+      }
+    }
+
     if (!db) {
       console.error('❌ Database not initialized');
       return [];
@@ -380,6 +429,18 @@ export const firebaseHelpers = {
   },
 
   async updateStudent(id: string, studentData: any) {
+    if (isPostgresPrimary()) {
+      try {
+        const { updateNestStudent } = await import('./nestStudentMapper');
+        const result = await updateNestStudent(id, studentData);
+        firebaseCache.invalidatePattern('students');
+        return result;
+      } catch (error) {
+        console.error('❌ Error updating student in PostgreSQL:', error);
+        return null;
+      }
+    }
+
     if (!db) return null;
     try {
       const result = await retryOperation(async () => {
@@ -407,6 +468,18 @@ export const firebaseHelpers = {
   },
 
   async deleteStudent(id: string) {
+    if (isPostgresPrimary()) {
+      try {
+        const { deleteNestStudent } = await import('./nestStudentMapper');
+        const result = await deleteNestStudent(id);
+        firebaseCache.invalidatePattern('students');
+        return result;
+      } catch (error) {
+        console.error('❌ Error deleting student in PostgreSQL:', error);
+        return null;
+      }
+    }
+
     if (!db) return null;
     try {
       const result = await retryOperation(async () => {

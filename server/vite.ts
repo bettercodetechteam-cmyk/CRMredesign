@@ -68,7 +68,12 @@ export async function setupVite(app: Express, server: Server) {
   // Wrap vite.middlewares to skip API routes
   app.use((req, res, next) => {
     // Skip API routes and auth endpoints - let Express handle them
-    if (req.path.startsWith('/api/') || req.path === '/auth' || req.path === '/api/auth') {
+    if (
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/nest-api/') ||
+      req.path === '/auth' ||
+      req.path === '/api/auth'
+    ) {
       return next();
     }
     // For all other routes, use Vite middleware
@@ -78,7 +83,12 @@ export async function setupVite(app: Express, server: Server) {
   // Handle SPA routing for non-API routes
   app.use(async (req, res, next) => {
     // Skip API routes and auth endpoints
-    if (req.path.startsWith('/api/') || req.path === '/auth' || req.path === '/api/auth') {
+    if (
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/nest-api/') ||
+      req.path === '/auth' ||
+      req.path === '/api/auth'
+    ) {
       return next();
     }
     

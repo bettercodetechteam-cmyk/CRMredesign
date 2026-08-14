@@ -84,7 +84,8 @@ import {
 import { isWebsiteEnquiryLead, centreDataStore, type LeadRecord } from "@/lib/centreDataStore";
 import { isNestLeadsEnabled } from "@/lib/nestApi";
 import {
-  buildNestUpdatePayload,
+  buildNestUpdatePayloadAsync,
+  resolveCourseInterestId,
   isNestBackedLead,
   mapNestLeadToUi,
   mapUiStatusToNest,
@@ -1218,13 +1219,14 @@ export default function Leads() {
       const existingLead = leadsData.find((l) => l.id === leadId);
 
       if (isNestLeadsEnabled() && isNestBackedLead(existingLead)) {
-        const nestPayload = buildNestUpdatePayload({
+        const nestPayload = await buildNestUpdatePayloadAsync({
           name: updates.leadName,
           phone: updates.contact,
           email: updates.emailId,
           source: updates.source,
           notes: updates.remark ?? updates.notes,
           nextFollowUpDate: updates.nextFollowUpDate ?? updates.followUpDate,
+          course: updates.course,
           version:
             typeof (existingLead as { version?: unknown } | undefined)?.version === 'number'
               ? ((existingLead as { version: number }).version)
@@ -1235,7 +1237,10 @@ export default function Leads() {
 
         if (updates.status && updates.status !== existingLead?.status) {
           if (updates.status === 'Admission Done') {
-            await nestLeadsApi.convert(leadId, {});
+            const courseId = await resolveCourseInterestId(
+              String(updates.course ?? existingLead?.course ?? ''),
+            );
+            await nestLeadsApi.convert(leadId, courseId ? { courseId } : {});
             updated = await nestLeadsApi.get(leadId);
           } else {
             const nestStatus = mapUiStatusToNest(String(updates.status));
@@ -1253,7 +1258,7 @@ export default function Leads() {
 
         const ui = mapNestLeadToUi(updated as Parameters<typeof mapNestLeadToUi>[0]);
         applyLeadsUpdater((prev) =>
-          prev.map((lead) => (lead.id === leadId ? { ...lead, ...ui, ...updates } : lead)),
+          prev.map((lead) => (lead.id === leadId ? { ...lead, ...ui } : lead)),
         );
       } else {
         const leadRef = getLeadDocRef(db, leadId, existingLead as unknown as LeadRecord);
@@ -1523,10 +1528,35 @@ export default function Leads() {
       const existingLead = leadsData.find((l) => l.id === leadId);
 
       if (isNestLeadsEnabled() && isNestBackedLead(existingLead)) {
+        applyLeadsUpdater((prev) => prev.filter((lead) => lead.id !== leadId));
+
+        try {
+          await reminderService.deleteRemindersForLead(leadId);
+        } catch (error) {
+          console.error('Error deleting follow-up reminders:', error);
+        }
+
+        await nestLeadsApi.remove(leadId);
+
+        const deleteEventDetail = {
+          leadId,
+          action: 'deleted',
+          timestamp: Date.now(),
+          source: 'leads',
+          preventRefresh: true,
+        };
+
+        setTimeout(() => {
+          window.dispatchEvent(
+            new CustomEvent('leadDataUpdated', { detail: deleteEventDetail }),
+          );
+        }, 100);
+
+        centreDataStore.refreshInBackground();
+
         toast({
-          title: "Delete not available",
-          description: "Nest leads cannot be deleted yet. Mark as Not Interested instead.",
-          variant: "destructive",
+          title: 'Lead deleted',
+          description: 'The lead has been removed successfully.',
         });
         return;
       }
@@ -1657,11 +1687,47 @@ export default function Leads() {
     }
 
     if (isNestLeadsEnabled()) {
-      toast({
-        title: "Delete not available",
-        description: "Bulk delete is not supported for Nest-backed leads yet.",
-        variant: "destructive",
-      });
+      setIsDeletingAll(true);
+      try {
+        const deletable = leadsData.filter(
+          (lead) =>
+            isNestBackedLead(lead) &&
+            lead.status !== 'Admission Done' &&
+            String((lead as { nestStatus?: string }).nestStatus ?? '') !== 'converted',
+        );
+
+        for (const lead of deletable) {
+          try {
+            await reminderService.deleteRemindersForLead(lead.id);
+          } catch {
+            /* continue */
+          }
+          await nestLeadsApi.remove(lead.id);
+        }
+
+        applyLeadsUpdater((prev) =>
+          prev.filter(
+            (lead) =>
+              !deletable.some((d) => d.id === lead.id),
+          ),
+        );
+        centreDataStore.refreshInBackground();
+
+        toast({
+          title: 'Leads deleted',
+          description: `Removed ${deletable.length} lead(s). Converted leads were skipped.`,
+        });
+      } catch (error) {
+        console.error('Bulk delete failed:', error);
+        fetchLeads(true);
+        toast({
+          title: 'Error',
+          description: 'Failed to delete all leads. Converted leads cannot be removed.',
+          variant: 'destructive',
+        });
+      } finally {
+        setIsDeletingAll(false);
+      }
       return;
     }
 

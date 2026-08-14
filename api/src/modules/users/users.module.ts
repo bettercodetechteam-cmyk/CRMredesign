@@ -1,5 +1,11 @@
 import { Module } from '@nestjs/common';
 
-/** Placeholder for staff/user accounts, roles and centre assignment. */
-@Module({})
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+
+@Module({
+  controllers: [UsersController],
+  providers: [UsersService],
+  exports: [UsersService],
+})
 export class UsersModule {}

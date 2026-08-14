@@ -31,4 +31,18 @@ export class DashboardController {
   ) {
     return this.dashboardService.getOverview(user, query);
   }
+
+  @Get('live')
+  @ApiOperation({
+    summary: 'Realtime dashboard snapshot',
+    description:
+      'Single round-trip for KPI cards, funnel, follow-ups, today/hot leads, recent students and payments.',
+  })
+  @ApiOkResponse({ description: 'Live CRM dashboard snapshot' })
+  getLive(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DashboardQueryDto,
+  ) {
+    return this.dashboardService.getLive(user, query);
+  }
 }

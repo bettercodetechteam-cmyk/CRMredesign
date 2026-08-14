@@ -29,6 +29,13 @@ export class AuthService {
    * Roles / centre / approval live in Postgres — Firebase is identity only.
    */
   async authenticateWithIdToken(idToken: string): Promise<AuthUser> {
+    return this.resolveUserFromIdToken(idToken, { requireApproved: true });
+  }
+
+  async resolveUserFromIdToken(
+    idToken: string,
+    options?: { requireApproved?: boolean },
+  ): Promise<AuthUser> {
     let firebaseUid: string;
 
     try {
@@ -60,7 +67,7 @@ export class AuthService {
       throw new ForbiddenException('Account is deactivated');
     }
 
-    if (!user.approved) {
+    if (options?.requireApproved !== false && !user.approved) {
       throw new ForbiddenException('Account not approved');
     }
 
@@ -79,6 +86,8 @@ export class AuthService {
       approved: user.approved,
       isActive: user.isActive,
       isDirector,
+      permissionsGranted: user.permissionsGranted ?? [],
+      permissionsRevoked: user.permissionsRevoked ?? [],
     };
   }
 }

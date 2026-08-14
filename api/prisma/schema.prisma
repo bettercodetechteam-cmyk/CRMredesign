@@ -71,6 +71,23 @@ enum BatchStatus {
   cancelled
 }
 
+enum TaskStatus {
+  pending
+  in_progress
+  completed_pending_approval
+  completed
+  overdue
+  on_hold
+  cancelled
+}
+
+enum TaskPriority {
+  low
+  medium
+  high
+  urgent
+}
+
 // ---------------------------------------------------------------------------
 // Core org tables
 // ---------------------------------------------------------------------------
@@ -98,6 +115,9 @@ model Centre {
   payments FeePayment[]
   receipts Receipt[]
   receiptCounters ReceiptCounter[]
+  crmFeeRecords   CrmFeeRecord[]
+  crmGstRecords   CrmGstRecord[]
+  tasks           Task[]
 
   @@map("centres")
 }
@@ -114,6 +134,8 @@ model User {
   centreId     String?   @map("centre_id") @db.Uuid
   isActive     Boolean   @default(true) @map("is_active")
   approved     Boolean   @default(false)
+  permissionsGranted String[] @default([]) @map("permissions_granted")
+  permissionsRevoked String[] @default([]) @map("permissions_revoked")
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -127,6 +149,10 @@ model User {
   createdFeePlans    StudentFee[]        @relation("FeePlanCreator")
   collectedPayments  FeePayment[]        @relation("PaymentCollector")
   issuedReceipts     Receipt[]           @relation("ReceiptIssuer")
+  createdTasks       Task[]              @relation("TaskCreator")
+  taskAssignments    TaskAssignee[]
+  taskComments       TaskComment[]
+  taskActivities     TaskActivity[]
 
   @@index([centreId, role])
   @@map("users")
@@ -282,6 +308,8 @@ model Student {
   address             String?
   admissionDate       DateTime      @default(dbgenerated("CURRENT_DATE")) @map("admission_date") @db.Date
   status              StudentStatus @default(active)
+  /// Extended student profile (fees, course details, zica/zima fields, etc.)
+  metadata            Json?         @db.JsonB
   createdById         String?       @map("created_by_id") @db.Uuid
   createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -467,4 +495,152 @@ model ReceiptCounter {
 
   @@unique([centreId, yearMonth], map: "receipt_counters_bucket_unique")
   @@map("receipt_counters")
+}
+
+// ---------------------------------------------------------------------------
+// Legacy CRM documents (migrated from Firestore fees / gst / customCourses)
+// ---------------------------------------------------------------------------
+
+model CrmFeeRecord {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  centreId      String   @map("centre_id") @db.Uuid
+  studentId     String?  @map("student_id") @db.Uuid
+  srNo          Int?     @map("sr_no")
+  contactNumber String?  @map("contact_number") @db.VarChar(20)
+  data          Json     @db.JsonB
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre Centre @relation(fields: [centreId], references: [id], onDelete: Cascade)
+
+  @@index([centreId, updatedAt(sort: Desc)])
+  @@index([studentId])
+  @@index([contactNumber])
+  @@map("crm_fee_records")
+}
+
+model CrmGstRecord {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  centreId  String   @map("centre_id") @db.Uuid
+  studentId String?  @map("student_id") @db.Uuid
+  data      Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre Centre @relation(fields: [centreId], references: [id], onDelete: Cascade)
+
+  @@index([centreId, updatedAt(sort: Desc)])
+  @@index([studentId])
+  @@map("crm_gst_records")
+}
+
+model CrmCustomCourse {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  centreId   String?  @map("centre_id") @db.Uuid
+  courseName String   @map("course_name") @db.VarChar(200)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([centreId, courseName])
+  @@map("crm_custom_courses")
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (director-assigned work)
+// ---------------------------------------------------------------------------
+
+model Task {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  centreId        String       @map("centre_id") @db.Uuid
+  title           String       @db.VarChar(200)
+  description     String?
+  assignedById    String       @map("assigned_by_id") @db.Uuid
+  priority        TaskPriority @default(medium)
+  status          TaskStatus   @default(pending)
+  startDate       DateTime?    @map("start_date") @db.Timestamptz(6)
+  dueDate         DateTime?    @map("due_date") @db.Timestamptz(6)
+  completionDate  DateTime?    @map("completion_date") @db.Timestamptz(6)
+  estimatedHours  Decimal?     @map("estimated_hours") @db.Decimal(8, 2)
+  actualHours     Decimal?     @map("actual_hours") @db.Decimal(8, 2)
+  progressPercent Int          @default(0) @map("progress_percent")
+  parentTaskId    String?      @map("parent_task_id") @db.Uuid
+  attachmentUrls  Json         @default("[]") @map("attachment_urls") @db.JsonB
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  centre     Centre         @relation(fields: [centreId], references: [id], onDelete: Cascade)
+  assignedBy User           @relation("TaskCreator", fields: [assignedById], references: [id], onDelete: Restrict)
+  parent     Task?          @relation("TaskTree", fields: [parentTaskId], references: [id], onDelete: SetNull)
+  children   Task[]         @relation("TaskTree")
+  assignees  TaskAssignee[]
+  subtasks   TaskSubtask[]
+  comments   TaskComment[]
+  activities TaskActivity[]
+
+  @@index([centreId, status, dueDate])
+  @@index([assignedById])
+  @@map("tasks")
+}
+
+model TaskAssignee {
+  taskId     String   @map("task_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  assignedAt DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+  @@index([userId])
+  @@map("task_assignees")
+}
+
+model TaskSubtask {
+  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId          String     @map("task_id") @db.Uuid
+  title           String     @db.VarChar(200)
+  status          TaskStatus @default(pending)
+  progressPercent Int        @default(0) @map("progress_percent")
+  sortOrder       Int        @default(0) @map("sort_order")
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, sortOrder])
+  @@map("task_subtasks")
+}
+
+model TaskComment {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId         String   @map("task_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  text           String
+  parentCommentId String? @map("parent_comment_id") @db.Uuid
+  attachments    Json     @default("[]") @db.JsonB
+  editHistory    Json     @default("[]") @map("edit_history") @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  task    Task          @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  parent  TaskComment?  @relation("CommentThread", fields: [parentCommentId], references: [id], onDelete: SetNull)
+  replies TaskComment[] @relation("CommentThread")
+
+  @@index([taskId, createdAt(sort: Desc)])
+  @@map("task_comments")
+}
+
+model TaskActivity {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId    String   @map("task_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  action    String   @db.VarChar(40)
+  metadata  Json     @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, createdAt(sort: Desc)])
+  @@map("task_activities")
 }

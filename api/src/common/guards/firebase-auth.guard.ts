@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 
+import { ALLOW_PENDING_KEY } from '../decorators/allow-pending.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { AuthUser } from '../../modules/auth/auth-user.types';
 import { AuthService } from '../../modules/auth/auth.service';
@@ -42,7 +43,14 @@ export class FirebaseAuthGuard implements CanActivate {
       throw new UnauthorizedException('Authentication required');
     }
 
-    request.user = await this.authService.authenticateWithIdToken(token);
+    const allowPending = this.reflector.getAllAndOverride<boolean>(
+      ALLOW_PENDING_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+
+    request.user = await this.authService.resolveUserFromIdToken(token, {
+      requireApproved: !allowPending,
+    });
     return true;
   }
 }

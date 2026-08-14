@@ -1,6 +1,7 @@
 import { doc, getDoc, getDocs, collection, runTransaction, setDoc, updateDoc, writeBatch, Timestamp } from 'firebase/firestore';
 import type { Firestore } from 'firebase/firestore';
 import { isValidReceiptOrInvoiceNumber } from '@/lib/gstRecordService';
+import { updateFeeRecord, usePostgresCrmRecords } from '@/lib/crmRecordsStore';
 
 /** All fee document fields that can hold a BETTERCODE receipt number (for renumbering). */
 const FEE_RECEIPT_FIELDS = [
@@ -143,6 +144,112 @@ export function clearVoidedReceiptFromMap(
   return next;
 }
 
+async function allocateReceiptNumberInCounter(
+  db: Firestore,
+  feeData: Record<string, unknown>,
+  isReceiptUsedOnFee: (num: string) => boolean,
+): Promise<string> {
+  const brand = resolveReceiptBrand(feeData);
+  const baseDate = resolveReceiptBaseDate(feeData);
+  let receiptNumber: string | null = null;
+
+  await runTransaction(db, async (tx) => {
+    if (brand === 'BETTERCODE') {
+      const counterRef = doc(db, 'receiptCounters', 'BETTERCODE');
+      const counterSnap = await tx.get(counterRef);
+      let nextValue = 1;
+
+      if (counterSnap.exists()) {
+        const data = counterSnap.data() as { next?: number };
+        nextValue = typeof data?.next === 'number' ? data.next : 1;
+      }
+
+      let safety = 0;
+      do {
+        receiptNumber = `BTC${String(nextValue).padStart(3, '0')}`;
+        nextValue += 1;
+        safety += 1;
+      } while (receiptNumber && isReceiptUsedOnFee(receiptNumber) && safety < 20);
+
+      tx.set(counterRef, { next: nextValue }, { merge: true });
+    } else {
+      const ymd = formatYmd(baseDate);
+      const yymd = formatYymd(baseDate);
+      const counterId = `ZICA_${ymd}`;
+      const counterRef = doc(db, 'receiptCounters', counterId);
+      const counterSnap = await tx.get(counterRef);
+      let nextValue = 1;
+
+      if (counterSnap.exists()) {
+        const data = counterSnap.data() as { next?: number };
+        nextValue = typeof data?.next === 'number' ? data.next : 1;
+      }
+
+      let safety = 0;
+      do {
+        receiptNumber = `Z${yymd}${String(nextValue).padStart(3, '0')}`;
+        nextValue += 1;
+        safety += 1;
+      } while (receiptNumber && isReceiptUsedOnFee(receiptNumber) && safety < 20);
+
+      tx.set(counterRef, { next: nextValue }, { merge: true });
+    }
+  });
+
+  if (!receiptNumber || !isUsableReceiptNumber(receiptNumber)) {
+    throw new Error('Failed to generate valid receipt number');
+  }
+  return receiptNumber;
+}
+
+async function resolveOrGenerateReceiptNumberPostgres(
+  db: Firestore,
+  feeId: string,
+  receiptType: string,
+  currentData?: Record<string, unknown>,
+): Promise<ResolveResult> {
+  const receiptFieldName = getReceiptFieldName(receiptType);
+  if (!receiptFieldName) {
+    throw new Error('Invalid receipt type');
+  }
+  if (!currentData) {
+    throw new Error('Fee record data is required to generate a receipt');
+  }
+
+  const feeData = { ...currentData };
+  const brand = resolveReceiptBrand(feeData);
+
+  const isReceiptUsedOnFee = (num: string): boolean =>
+    FEE_RECEIPT_FIELDS.some((field) => {
+      const v = feeData[field];
+      return typeof v === 'string' && v !== '-' && v.trim() === num;
+    });
+
+  const voidedReceipt = getVoidedReceiptForField(feeData, receiptFieldName);
+  if (
+    voidedReceipt &&
+    isUsableReceiptNumber(voidedReceipt) &&
+    receiptNumberMatchesBrand(voidedReceipt, brand) &&
+    !isReceiptUsedOnFee(voidedReceipt)
+  ) {
+    const clearedVoided = clearVoidedReceiptFromMap(
+      feeData[VOIDED_RECEIPTS_FIELD] as Record<string, unknown> | undefined,
+      receiptFieldName,
+    );
+    const reusePayload: Record<string, unknown> = {
+      [receiptFieldName]: voidedReceipt,
+      [VOIDED_RECEIPTS_FIELD]: clearedVoided,
+    };
+    await updateFeeRecord(feeId, reusePayload);
+    return { receiptNumber: voidedReceipt, feeData: { ...feeData, ...reusePayload } };
+  }
+
+  const receiptNumber = await allocateReceiptNumberInCounter(db, feeData, isReceiptUsedOnFee);
+  const updatePayload: Record<string, unknown> = { [receiptFieldName]: receiptNumber };
+  await updateFeeRecord(feeId, updatePayload);
+  return { receiptNumber, feeData: { ...feeData, ...updatePayload } };
+}
+
 /**
  * Resolve existing or generate new receipt number in a single transaction.
  * Prevents double-increment when ReceiptPage mounts twice (e.g. Strict Mode)
@@ -155,7 +262,6 @@ export async function resolveOrGenerateReceiptNumber(
   currentData?: Record<string, unknown>
 ): Promise<ResolveResult> {
   const receiptFieldName = getReceiptFieldName(receiptType);
-  const feeRef = doc(db, 'fees', feeId);
 
   // Fast path (NO Firestore call if data provided):
   // Only reuse the receipt stored in the field for THIS payment type — never fall back to
@@ -171,10 +277,13 @@ export async function resolveOrGenerateReceiptNumber(
     }
   }
 
+  if (usePostgresCrmRecords()) {
+    return resolveOrGenerateReceiptNumberPostgres(db, feeId, receiptType, currentData);
+  }
 
-
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const feeRef = doc(db, 'fees', feeId);
   const maxRetries = 3;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {

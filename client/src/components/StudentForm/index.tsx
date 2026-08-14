@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -25,13 +25,23 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { firebaseHelpers } from "@/lib/firebaseHelpers";
 import { firebaseCache } from "@/lib/firebaseCache";
+import {
+  createFeeRecord as createPostgresFeeRecord,
+  createCustomCourse,
+  listFeeRecords,
+  listCustomCourses,
+  updateFeeRecord as updatePostgresFeeRecord,
+  usePostgresCrmRecords,
+} from "@/lib/crmRecordsStore";
 import { commonSchemas } from "@/lib/validationUtils";
-import { Loader2, UserPlus, GraduationCap, DollarSign, Calendar, CreditCard, Search, Plus, X } from "lucide-react";
+import { Loader2, UserPlus, GraduationCap, DollarSign, Calendar, CreditCard, Search, Plus, X, Users } from "lucide-react";
 import { formatDateForInput } from "@/utils/dateUtils";
+import { useCentreData } from "@/contexts/CentreDataContext";
+import type { LeadRecord } from "@/lib/centreDataStore";
 import { collection, addDoc, query, where, getDocs, orderBy, Timestamp, updateDoc, doc } from "firebase/firestore";
 import { getNextSerialNumberFromItems } from "@/lib/serialNumberUtils";
 import { db } from "@/lib/firebase";
-import { MAX_INSTALLMENTS } from "@/constants/feeInstallments";
+import { MAX_INSTALLMENTS, INSTALLMENT_RECEIPT_FIELDS } from "@/constants/feeInstallments";
 import { applyInstallmentDueDatesToFeePayload } from "@/utils/feeInstallmentSchedule";
 import { 
   ALL_STANDARDIZED_COURSES, 
@@ -104,6 +114,98 @@ const convertMonthToDisplayFormat = (monthStr: string | null | undefined): strin
   return monthStr;
 };
 
+type FeePaymentSnapshot = {
+  feesPaid: number;
+  feesPaidDate: Date | string | null;
+  paymentMode: string;
+  chequeNumber: string;
+  installmentsPaid: number;
+  remainingInstallments: number;
+  balanceInstallments: number;
+};
+
+const FEE_RECEIPT_PRESERVE_KEYS = [
+  "regularFeesReceiptNumber",
+  "registrationReceiptNumber",
+  "receiptNumber",
+  "fullPaymentReceiptNumber",
+  ...INSTALLMENT_RECEIPT_FIELDS,
+];
+
+function copyFeeReceiptFieldsFromSource(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): void {
+  for (const key of FEE_RECEIPT_PRESERVE_KEYS) {
+    if (source[key] !== undefined) {
+      target[key] = source[key];
+    }
+  }
+}
+
+function buildFeePaymentSnapshot(
+  fee: Record<string, unknown> | null,
+  studentFallback?: Record<string, unknown> | null,
+): FeePaymentSnapshot {
+  const noOfInst =
+    Number(fee?.numberOfInstallments ?? fee?.noOfInstallments ?? studentFallback?.noOfInstallments) || 0;
+  const balanceInst =
+    fee?.balanceInstallments != null
+      ? Number(fee.balanceInstallments)
+      : Math.max(0, noOfInst - Number(studentFallback?.installmentsPaid ?? 0));
+  const installmentsPaid = fee
+    ? Math.max(0, noOfInst - balanceInst)
+    : Number(studentFallback?.installmentsPaid ?? 0);
+
+  return {
+    feesPaid: Number(fee?.feesPaid ?? studentFallback?.feesPaid) || 0,
+    feesPaidDate: (fee?.feesPaidDate ?? studentFallback?.feesPaidDate ?? null) as Date | string | null,
+    paymentMode: String(fee?.paymentMode ?? studentFallback?.paymentMode ?? ""),
+    chequeNumber: String(fee?.chequeNumber ?? studentFallback?.chequeNumber ?? ""),
+    installmentsPaid,
+    remainingInstallments: balanceInst,
+    balanceInstallments: balanceInst,
+  };
+}
+
+async function findFeeRecordForStudent(
+  centreId: string | undefined,
+  studentId: string,
+  phone?: string,
+): Promise<Record<string, unknown> | null> {
+  if (usePostgresCrmRecords()) {
+    const allFees = await listFeeRecords(centreId);
+    const byStudent = allFees.find((row) => String(row.studentId) === studentId);
+    if (byStudent) return byStudent;
+    if (phone) {
+      return allFees.find((row) => row.contactNumber === phone) ?? null;
+    }
+    return null;
+  }
+
+  if (!db) return null;
+
+  const byStudentSnap = await getDocs(
+    query(collection(db, "fees"), where("studentId", "==", studentId)),
+  );
+  if (!byStudentSnap.empty) {
+    const docSnap = byStudentSnap.docs[0];
+    return { id: docSnap.id, ...docSnap.data() };
+  }
+
+  if (phone) {
+    const byPhoneSnap = await getDocs(
+      query(collection(db, "fees"), where("contactNumber", "==", phone)),
+    );
+    if (!byPhoneSnap.empty) {
+      const docSnap = byPhoneSnap.docs[0];
+      return { id: docSnap.id, ...docSnap.data() };
+    }
+  }
+
+  return null;
+}
+
 interface StudentFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -140,6 +242,7 @@ type StudentFormData = {
   status?: string;
   centreId?: string;
   zicaSubCategory?: string;
+  leadId?: string;
 };
 
 // ZICA/ZIMA Courses - All standardized courses
@@ -173,8 +276,8 @@ const bettercodeCourses = [
   "ReactJS"
 ];
 
-const paymentModes = ["Cash", "UPI", "Bank Transfer", "Cheque", "Card"];
 const zicaZimaOptions = ["ZICA", "AIGT"];
+const paymentModes = ["Cash", "UPI", "Bank Transfer", "Cheque", "Card"];
 const feesStructureOptions = ["Full Payment", "Installment"];
 const courseDurationOptions = ["1", "1.5", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "27", "36", "Other"];
 
@@ -182,6 +285,7 @@ function getEditDefaultValues(s: any, centreId?: string): Partial<StudentFormDat
   const emailVal = s?.email ?? s?.emailId ?? "";
   const parentsVal = s?.parentsContactNumber ?? s?.parentContact ?? s?.parentsPhone ?? s?.parentPhone ?? "";
   const src = (s?.source || s?.leadSource || "").trim();
+  const courseLabel = String(s?.course ?? s?.courseInterest ?? s?.program ?? "").trim();
   return {
     srNo: s?.srNo?.toString() || "",
     studentFullName: `${s?.firstName ?? ""} ${s?.lastName ?? ""}`.trim() || "",
@@ -192,7 +296,7 @@ function getEditDefaultValues(s: any, centreId?: string): Partial<StudentFormDat
     admissionDate: formatDateForInput(s?.admissionDate),
     zicaZima: s?.zicaZima || "",
     feesStructure: s?.feesStructure || "",
-    course: s?.course || "",
+    course: courseLabel,
     courseDuration: s?.courseDuration?.toString() || "",
     courseStartDate: formatDateForInput(s?.courseStartDate),
     actualFees: s?.actualFees?.toString() || "",
@@ -239,6 +343,10 @@ export default function StudentForm({
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { userProfile } = useAuth();
+  const { leads, refresh: refreshLeads } = useCentreData();
+  const [selectedLeadId, setSelectedLeadId] = useState<string>("");
+  const [selectedLeadCourseInterestId, setSelectedLeadCourseInterestId] = useState<string>("");
+  const [leadSearchTerm, setLeadSearchTerm] = useState("");
   const [courses, setCourses] = useState<string[]>([]);
   const [customCourses, setCustomCourses] = useState<string[]>([]);
   const [showCustomCourseInput, setShowCustomCourseInput] = useState(false);
@@ -252,6 +360,17 @@ export default function StudentForm({
   const [customSourceInput, setCustomSourceInput] = useState("");
   // Remember last entered source so it appears on next open (create) instead of always "Justdial"
   const [lastUsedSource, setLastUsedSource] = useState("");
+  const feePaymentSnapshotRef = useRef<FeePaymentSnapshot | null>(null);
+
+  const ensureCourseOption = React.useCallback((courseName: string) => {
+    const trimmed = courseName.trim();
+    if (!trimmed) return;
+    setCourses((prev) => (prev.includes(trimmed) ? prev : [...prev, trimmed]));
+  }, []);
+
+  const resolveStudentCourseForForm = React.useCallback((s: Record<string, unknown>) => {
+    return String(s?.course ?? s?.courseInterest ?? s?.program ?? "").trim();
+  }, []);
 
   // When dialog opens for edit we remount (parent uses key=student.id), so useForm gets these defaults once at mount
   const formDefaultValues = (open && mode === "edit" && student)
@@ -262,6 +381,83 @@ export default function StudentForm({
     resolver: zodResolver(commonSchemas.student),
     defaultValues: formDefaultValues,
   });
+
+  const applyFeePaymentSnapshotToForm = useCallback(
+    (snapshot: FeePaymentSnapshot) => {
+      feePaymentSnapshotRef.current = snapshot;
+      form.setValue("feesPaid", snapshot.feesPaid.toString(), { shouldDirty: false });
+      form.setValue("feesPaidDate", formatDateForInput(snapshot.feesPaidDate), { shouldDirty: false });
+      form.setValue("paymentMode", snapshot.paymentMode, { shouldDirty: false });
+      form.setValue("chequeNumber", snapshot.chequeNumber, { shouldDirty: false });
+      form.setValue("installmentsPaid", snapshot.installmentsPaid.toString(), { shouldDirty: false });
+      form.setValue("remainingInstallments", snapshot.remainingInstallments.toString(), {
+        shouldDirty: false,
+      });
+      form.setValue(
+        "feesBalance",
+        Math.max(0, (parseFloat(form.getValues("discountedFees") || "0") || parseFloat(form.getValues("actualFees") || "0")) - snapshot.feesPaid).toFixed(2),
+        { shouldDirty: false },
+      );
+    },
+    [form],
+  );
+
+  const loadFeePaymentFields = useCallback(
+    async (studentId: string, phone: string, studentFallback?: Record<string, unknown> | null) => {
+      try {
+        const feeRecord = await findFeeRecordForStudent(userProfile?.centreId, studentId, phone);
+        applyFeePaymentSnapshotToForm(buildFeePaymentSnapshot(feeRecord, studentFallback));
+      } catch (error) {
+        console.error("Failed to load fee payment fields:", error);
+        applyFeePaymentSnapshotToForm(buildFeePaymentSnapshot(null, studentFallback));
+      }
+    },
+    [applyFeePaymentSnapshotToForm, userProfile?.centreId],
+  );
+
+  const selectableLeads = React.useMemo(() => {
+    return leads
+      .filter((lead) => {
+        const status = String(lead.status ?? "");
+        const nestStatus = String(lead.nestStatus ?? "");
+        return status !== "Admission Done" && nestStatus !== "converted";
+      })
+      .sort((a, b) =>
+        String(a.leadName ?? "").localeCompare(String(b.leadName ?? ""), undefined, {
+          sensitivity: "base",
+        }),
+      );
+  }, [leads]);
+
+  const applyLeadToForm = React.useCallback(
+    (lead: LeadRecord) => {
+      setSelectedLeadId(String(lead.id));
+      setSelectedLeadCourseInterestId(
+        typeof lead.courseInterestId === "string" ? lead.courseInterestId : "",
+      );
+      form.setValue("studentFullName", String(lead.leadName ?? "").trim());
+      form.setValue("phone", String(lead.contact ?? lead.phone ?? "").trim());
+      form.setValue("email", String(lead.emailId ?? lead.email ?? "").trim());
+      form.setValue("source", String(lead.source ?? "").trim());
+      if (lead.course) {
+        const courseName = String(lead.course);
+        form.setValue("course", courseName);
+        setCourses((prev) =>
+          prev.includes(courseName) ? prev : [...prev, courseName],
+        );
+      }
+      if (lead.remark || lead.notes) {
+        form.setValue("remarks", String(lead.remark ?? lead.notes ?? ""));
+      }
+    },
+    [form],
+  );
+
+  useEffect(() => {
+    if (open && mode === "create") {
+      void refreshLeads();
+    }
+  }, [open, mode, refreshLeads]);
 
   // Function to load sources (default + custom)
   useEffect(() => {
@@ -290,10 +486,15 @@ export default function StudentForm({
     return unsubscribe;
   }, [userProfile?.centreId]);
 
-  // Load custom courses from Firestore
+  // Load custom courses
   useEffect(() => {
     const loadCustomCourses = async () => {
       try {
+        if (usePostgresCrmRecords()) {
+          const rows = await listCustomCourses(userProfile?.centreId);
+          setCustomCourses(rows.map((row) => row.courseName));
+          return;
+        }
         const customCoursesQuery = query(collection(db, 'customCourses'), orderBy('createdAt', 'desc'));
         const snapshot = await getDocs(customCoursesQuery);
         const loadedCourses = snapshot.docs.map(doc => doc.data().courseName);
@@ -303,7 +504,7 @@ export default function StudentForm({
       }
     };
     loadCustomCourses();
-  }, []);
+  }, [userProfile?.centreId]);
 
   // Update courses based on selected program
   useEffect(() => {
@@ -333,6 +534,10 @@ export default function StudentForm({
   // Reset form when dialog opens/closes or mode changes
   useEffect(() => {
     if (!open) {
+      setSelectedLeadId("");
+      setSelectedLeadCourseInterestId("");
+      setLeadSearchTerm("");
+      feePaymentSnapshotRef.current = null;
       // Reset form when dialog closes; keep source as lastUsedSource for next open
       form.reset({
         studentFullName: "",
@@ -375,6 +580,13 @@ export default function StudentForm({
         const src = (s?.source || s?.leadSource || "").trim();
         const emailVal = s?.email ?? s?.emailId ?? "";
         const parentsVal = s?.parentsContactNumber ?? s?.parentContact ?? s?.parentsPhone ?? s?.parentPhone ?? "";
+        const courseLabel = resolveStudentCourseForForm(s) || String(s?.course ?? "").trim();
+        if (courseLabel) {
+          ensureCourseOption(courseLabel);
+        }
+        if (s?.leadId) {
+          setSelectedLeadId(String(s.leadId));
+        }
         form.reset({
           srNo: s?.srNo?.toString() || "",
           studentFullName: `${s?.firstName ?? ""} ${s?.lastName ?? ""}`.trim() || "",
@@ -385,7 +597,7 @@ export default function StudentForm({
           admissionDate: formatDateForInput(s?.admissionDate),
           zicaZima: s?.zicaZima || "",
           feesStructure: s?.feesStructure || "",
-          course: s?.course || "",
+          course: courseLabel,
           courseDuration: s?.courseDuration?.toString() || "",
           courseStartDate: formatDateForInput(s?.courseStartDate),
           actualFees: s?.actualFees?.toString() || "",
@@ -406,13 +618,23 @@ export default function StudentForm({
         });
         form.setValue("email", String(emailVal), { shouldDirty: false });
         form.setValue("parentsContactNumber", String(parentsVal), { shouldDirty: false });
+        void loadFeePaymentFields(String(student.id), String(s?.phone || s?.contact || ""), s);
       };
-      firebaseHelpers.getStudentById(student.id).then((fresh) => {
-        applyStudentToForm(fresh || student);
-      }).catch(() => {
-        applyStudentToForm(student);
-      });
+      const loadEditStudent = async () => {
+        try {
+          const fresh = await firebaseHelpers.getStudentById(student.id);
+          let record = (fresh || student) as Record<string, unknown>;
+          const { enrichStudentRecordForUi } = await import("@/lib/nestStudentMapper");
+          record = await enrichStudentRecordForUi(record);
+          applyStudentToForm(record);
+        } catch {
+          applyStudentToForm(student);
+        }
+      };
+      void loadEditStudent();
     } else if (mode === "create") {
+      feePaymentSnapshotRef.current = buildFeePaymentSnapshot(null);
+      applyFeePaymentSnapshotToForm(feePaymentSnapshotRef.current);
       // Reset to default values only when dialog opens (not when lastUsedSource changes).
       // Using lastUsedSource here is safe: we read it when effect runs (on open), so we do not
       // include it in deps to avoid re-running and clearing fields when user selects a source.
@@ -446,7 +668,7 @@ export default function StudentForm({
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- lastUsedSource intentionally omitted: reset only on open, not when user selects source
-  }, [open, student, mode, nextSrNo, userProfile?.centreId, form]);
+  }, [open, student, mode, nextSrNo, userProfile?.centreId, form, loadFeePaymentFields, applyFeePaymentSnapshotToForm]);
 
   // Calculate fees balance when fees change
   const actualFees = parseFloat(form.watch("actualFees") || "0");
@@ -474,6 +696,19 @@ export default function StudentForm({
   // Function to update fee record when student is updated
   const updateFeeRecord = async (studentId: string, studentData: any) => {
     try {
+      if (usePostgresCrmRecords()) {
+        const allFees = await listFeeRecords(userProfile?.centreId);
+        const byStudent = allFees.find((row) => row.studentId === studentId);
+        const byContact = allFees.find((row) => row.contactNumber === studentData.phone);
+        const match = byStudent ?? byContact;
+        if (match?.id) {
+          await updateFeeDocument(String(match.id), match, studentData, studentId);
+        } else {
+          await createFeeRecord(studentData, studentId);
+        }
+        return;
+      }
+
       if (!db) return;
       
       // Find the fee record by studentId
@@ -523,7 +758,6 @@ export default function StudentForm({
 
   // Helper to perform the actual update of a fee document
   const updateFeeDocument = async (feeId: string, existingFeeData: any, studentData: any, studentId: string) => {
-      // Check if data actually changed
       const newFeesPaid = studentData.feesPaid || 0;
       const newDiscountedFees = studentData.discountedFees || studentData.actualFees || 0;
       const newActualFees = studentData.actualFees || 0;
@@ -539,8 +773,6 @@ export default function StudentForm({
         (existingFeeData.source !== (studentData.source || 'Justdial')) ||
         (existingFeeData.courseDuration !== (studentData.courseDuration?.toString() || ''));
       
-      // Skip update if no significant changes detected and studentId is already correct
-      // But ALWAYS update if studentId or centreId is missing/wrong
       if (!feesChanged && 
           existingFeeData.studentName === `${studentData.firstName} ${studentData.lastName}`.trim() &&
           existingFeeData.paymentMode === (studentData.paymentMode || 'Cash') &&
@@ -549,7 +781,6 @@ export default function StudentForm({
         return; 
       }
       
-      // Convert student data to fee record format
       let zicaBettercode: 'ZICA' | 'BETTERCODE' | 'Non-ZICA' = 'ZICA';
       if (studentData.zicaZima === 'Bettercode' || studentData.zicaZima === 'AIGT') {
         zicaBettercode = 'BETTERCODE';
@@ -579,9 +810,8 @@ export default function StudentForm({
       const noOfInstallments = studentData.noOfInstallments || 0;
       const installmentsPaid = studentData.installmentsPaid || 0;
       const remainingInstallmentsCount = Math.max(0, noOfInstallments - installmentsPaid);
-      const remainingFees = Math.max(0, (studentData.discountedFees || studentData.actualFees || 0) - (studentData.feesPaid || 0));
+      const remainingFees = Math.max(0, newDiscountedFees - newFeesPaid);
       
-      // Calculate installment amounts if needed
       let installmentAmount = 0;
       let lastInstallmentAmount = 0;
       if (remainingInstallmentsCount > 0) {
@@ -590,7 +820,6 @@ export default function StudentForm({
         lastInstallmentAmount = parseFloat((remainingFees - totalDistributed).toFixed(2));
       }
       
-      // Prepare update data
       const feeUpdateData: any = {
         studentName: `${studentData.firstName} ${studentData.lastName}`.trim(),
         contactNumber: studentData.phone,
@@ -605,8 +834,8 @@ export default function StudentForm({
           ? (studentData.courseStartDate instanceof Date ? Timestamp.fromDate(studentData.courseStartDate) : studentData.courseStartDate)
           : Timestamp.now(),
         actualFees: studentData.actualFees || 0,
-        discountedFees: studentData.discountedFees || studentData.actualFees || 0,
-        feesPaid: studentData.feesPaid || 0,
+        discountedFees: newDiscountedFees,
+        feesPaid: newFeesPaid,
         feesPaidDate: studentData.feesPaidDate 
           ? (studentData.feesPaidDate instanceof Date ? Timestamp.fromDate(studentData.feesPaidDate) : studentData.feesPaidDate)
           : null,
@@ -614,7 +843,7 @@ export default function StudentForm({
         paymentMode: (studentData.paymentMode || 'Cash') as 'Cash' | 'Card' | 'UPI' | 'Bank Transfer' | 'Cheque',
         chequeNumber: studentData.chequeNumber || '',
         numberOfInstallments: noOfInstallments,
-        balanceInstallments: studentData.remainingInstallments || 0,
+        balanceInstallments: studentData.remainingInstallments ?? remainingInstallmentsCount,
         dueDate: studentData.dueDate 
           ? (studentData.dueDate instanceof Date ? Timestamp.fromDate(studentData.dueDate) : studentData.dueDate)
           : null,
@@ -624,9 +853,9 @@ export default function StudentForm({
           ? (studentData.admissionDate instanceof Date ? Timestamp.fromDate(studentData.admissionDate) : studentData.admissionDate)
           : Timestamp.now(),
         centreId: studentData.centreId || userProfile?.centreId,
+        studentId,
       };
       
-      // Update installment fields
       for (let i = 1; i <= noOfInstallments && i <= MAX_INSTALLMENTS; i++) {
         const installmentKey = `installment${String(i).padStart(2, '0')}`;
         if (i <= installmentsPaid) {
@@ -638,11 +867,12 @@ export default function StudentForm({
         }
       }
       
-      // Clear installment fields beyond numberOfInstallments
       for (let i = noOfInstallments + 1; i <= MAX_INSTALLMENTS; i++) {
         const installmentKey = `installment${String(i).padStart(2, '0')}`;
         feeUpdateData[installmentKey] = 0;
       }
+
+      copyFeeReceiptFieldsFromSource(feeUpdateData, existingFeeData);
 
       applyInstallmentDueDatesToFeePayload(feeUpdateData, {
         noOfInstallments,
@@ -652,15 +882,23 @@ export default function StudentForm({
         courseStartDate: studentData.courseStartDate,
       });
       
-      // Update the fee record
-      const feeDocRef = doc(db, 'fees', feeId);
-      await updateDoc(feeDocRef, feeUpdateData);
+      if (usePostgresCrmRecords()) {
+        await updatePostgresFeeRecord(feeId, feeUpdateData);
+      } else {
+        const feeDocRef = doc(db, 'fees', feeId);
+        await updateDoc(feeDocRef, feeUpdateData);
+      }
   };
 
 
   // Function to create fee record automatically when student is created
   const createFeeRecord = async (studentData: any, studentId: string) => {
     try {
+      if (usePostgresCrmRecords()) {
+        const allFees = await listFeeRecords(userProfile?.centreId);
+        const exists = allFees.some((row) => row.contactNumber === studentData.phone);
+        if (exists) return;
+      } else {
       const feesQuery = query(
         collection(db, 'fees'),
         where('contactNumber', '==', studentData.phone)
@@ -669,6 +907,7 @@ export default function StudentForm({
       
       if (!existingFees.empty) {
         return;
+      }
       }
 
 
@@ -710,11 +949,17 @@ export default function StudentForm({
         feesStructure = 'NEW';
       }
       
-      const feesQueryAll = query(collection(db, 'fees'));
-      const allFees = await getDocs(feesQueryAll);
-      const nextSrNo = getNextSerialNumberFromItems(
-        allFees.docs.map((d) => d.data())
-      );
+      let nextSrNo = 1;
+      if (usePostgresCrmRecords()) {
+        const allFeeRows = await listFeeRecords(userProfile?.centreId);
+        nextSrNo = getNextSerialNumberFromItems(allFeeRows);
+      } else {
+        const feesQueryAll = query(collection(db, 'fees'));
+        const allFees = await getDocs(feesQueryAll);
+        nextSrNo = getNextSerialNumberFromItems(
+          allFees.docs.map((d) => d.data())
+        );
+      }
       
       const admissionMonth = new Date().toLocaleString('default', { month: 'long' }).toUpperCase();
       
@@ -773,10 +1018,58 @@ export default function StudentForm({
         courseStartDate: studentData.courseStartDate,
       });
       
-      const feeDocRef = await addDoc(collection(db, 'fees'), feeRecord);
+      const feeDocRef = usePostgresCrmRecords()
+        ? await createPostgresFeeRecord(feeRecord)
+        : await addDoc(collection(db, 'fees'), feeRecord);
+      void feeDocRef;
     } catch (error) {
       console.error('❌ Error creating fee record:', error);
     }
+  };
+
+  const buildStudentDataFromForm = (data: StudentFormData) => {
+    const fullName = data.studentFullName?.trim() || "";
+    const parsedFeesPaid = data.feesPaid ? parseFloat(data.feesPaid) : 0;
+    const parsedDiscounted = data.discountedFees ? parseFloat(data.discountedFees) : 0;
+    const parsedActual = data.actualFees ? parseFloat(data.actualFees) : 0;
+
+    return {
+      srNo: data.srNo ? parseInt(data.srNo) : nextSrNo || 1,
+      firstName: fullName,
+      lastName: "",
+      email: data.email?.trim() || "",
+      phone: data.phone.trim(),
+      parentsContactNumber: data.parentsContactNumber?.trim() || "",
+      source: data.source?.trim() || "Justdial",
+      admissionMonth:
+        mode === "edit" && student?.admissionMonth
+          ? student.admissionMonth
+          : new Date().toLocaleString("default", { month: "long" }),
+      admissionDate: data.admissionDate ? new Date(data.admissionDate) : null,
+      zicaZima: data.zicaZima || "",
+      zicaSubCategory: data.zicaSubCategory || "",
+      feesStructure: data.feesStructure || "",
+      course: data.course.trim(),
+      courseDuration: data.courseDuration ? parseFloat(data.courseDuration) : null,
+      courseStartDate: data.courseStartDate ? new Date(data.courseStartDate) : null,
+      actualFees: parsedActual,
+      discountedFees: parsedDiscounted,
+      feesPaid: parsedFeesPaid,
+      feesPaidDate: data.feesPaidDate ? new Date(data.feesPaidDate) : null,
+      feesBalance: Math.max(0, (parsedDiscounted || parsedActual) - parsedFeesPaid),
+      paymentMode: data.paymentMode || "",
+      chequeNumber: data.chequeNumber || "",
+      noOfInstallments: data.noOfInstallments ? parseInt(data.noOfInstallments) : 0,
+      installmentsPaid: data.installmentsPaid ? parseInt(data.installmentsPaid) : 0,
+      remainingInstallments,
+      dueDate: data.dueDate ? new Date(data.dueDate) : null,
+      remarks: data.remarks || "",
+      status: data.status || "active",
+      centreId: userProfile?.centreId,
+      leadId: selectedLeadId || undefined,
+      createdAt: student?.createdAt || new Date(),
+      updatedAt: new Date(),
+    };
   };
 
   const saveMutation = useMutation({
@@ -785,40 +1078,17 @@ export default function StudentForm({
         throw new Error("Centre ID is required");
       }
 
-      const fullName = data.studentFullName?.trim() || "";
-      const studentData: any = {
-        srNo: data.srNo ? parseInt(data.srNo) : nextSrNo || 1,
-        firstName: fullName,
-        lastName: "",
-        email: data.email?.trim() || "",
-        phone: data.phone.trim(),
-        parentsContactNumber: data.parentsContactNumber?.trim() || "",
-        source: data.source?.trim() || "Justdial",
-        admissionMonth: (mode === "edit" && student?.admissionMonth) ? student.admissionMonth : new Date().toLocaleString('default', { month: 'long' }),
-        admissionDate: data.admissionDate ? new Date(data.admissionDate) : null,
-        zicaZima: data.zicaZima || "",
-        zicaSubCategory: data.zicaSubCategory || "",
-        feesStructure: data.feesStructure || "",
-        course: data.course.trim(),
-        courseDuration: data.courseDuration ? parseFloat(data.courseDuration) : null,
-        courseStartDate: data.courseStartDate ? new Date(data.courseStartDate) : null,
-        actualFees: data.actualFees ? parseFloat(data.actualFees) : 0,
-        discountedFees: data.discountedFees ? parseFloat(data.discountedFees) : 0,
-        feesPaid: data.feesPaid ? parseFloat(data.feesPaid) : 0,
-        feesPaidDate: data.feesPaidDate ? new Date(data.feesPaidDate) : null,
-        feesBalance: feesBalance,
-        paymentMode: data.paymentMode || "",
-        chequeNumber: data.chequeNumber || "",
-        noOfInstallments: data.noOfInstallments ? parseInt(data.noOfInstallments) : 0,
-        installmentsPaid: data.installmentsPaid ? parseInt(data.installmentsPaid) : 0,
-        remainingInstallments: remainingInstallments,
-        dueDate: data.dueDate ? new Date(data.dueDate) : null,
-        remarks: data.remarks || "",
-        status: data.status || "active",
-        centreId: userProfile.centreId,
-        createdAt: student?.createdAt || new Date(),
-        updatedAt: new Date(),
+      const studentData = {
+        ...buildStudentDataFromForm(data),
+        courseId: undefined,
+        courseInterestId: undefined,
       };
+      const resolvedCourseId = await import('@/lib/nestStudentMapper').then((m) =>
+        m.resolveCourseId(data.course),
+      );
+      if (resolvedCourseId) {
+        studentData.courseId = resolvedCourseId;
+      }
 
       let studentId: string;
       if (mode === "edit" && student?.id) {
@@ -828,8 +1098,8 @@ export default function StudentForm({
         await updateFeeRecord(studentId, studentData);
       } else {
         studentId = await firebaseHelpers.saveStudent(studentData) || '';
-        if (studentId && mode === "create") {
-          await createFeeRecord(studentData, studentId);
+        if (studentId) {
+          await updateFeeRecord(studentId, studentData);
         }
       }
       
@@ -842,6 +1112,9 @@ export default function StudentForm({
       queryClient.invalidateQueries({ queryKey: ["students"] });
       await queryClient.refetchQueries({ queryKey: ["students"] });
       queryClient.invalidateQueries({ queryKey: ["fees"] });
+      if (selectedLeadId) {
+        void refreshLeads();
+      }
       toast({
         title: "Success",
         description: mode === "create" ? "Student added successfully!" : "Student updated successfully!",
@@ -859,8 +1132,23 @@ export default function StudentForm({
   });
 
   const onSubmit = (data: StudentFormData) => {
+    if (mode === "create" && !selectedLeadId) {
+      toast({
+        title: "Lead required",
+        description: "Please select a lead before adding a student.",
+        variant: "destructive",
+      });
+      return;
+    }
     saveMutation.mutate(data);
   };
+
+  const isCreateMode = mode === "create";
+  const isLeadIdentityLocked = isCreateMode;
+  const isSupplementalDisabled = isCreateMode && !selectedLeadId;
+  const leadFieldPlaceholder = selectedLeadId
+    ? undefined
+    : "Filled automatically when you select a lead";
 
   if (!open) {
     return null;
@@ -878,7 +1166,7 @@ export default function StudentForm({
           </DialogTitle>
           <DialogDescription>
             {mode === "create"
-              ? "Fill in the details to add a new student to the system"
+              ? "Select a lead to create a student — contact details come from the lead; add admission and fee details below."
               : "Update the student information below"}
           </DialogDescription>
         </DialogHeader>
@@ -900,6 +1188,85 @@ export default function StudentForm({
               Basic Information
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {mode === "create" && (
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="lead-select">
+                    <span className="inline-flex items-center gap-2">
+                      <Users className="w-4 h-4 text-blue-600" />
+                      Select from Lead <span className="text-red-500">*</span>
+                    </span>
+                  </Label>
+                  <Select
+                    value={selectedLeadId}
+                    onValueChange={(value) => {
+                      const lead = selectableLeads.find((item) => String(item.id) === value);
+                      if (lead) {
+                        applyLeadToForm(lead);
+                      }
+                    }}
+                  >
+                    <SelectTrigger id="lead-select" className="w-full">
+                      <SelectValue placeholder="Choose a lead to auto-fill student details" />
+                    </SelectTrigger>
+                    <SelectContent className="z-[99999] max-h-[320px]">
+                      <div className="sticky top-0 bg-white p-2 border-b">
+                        <div className="relative">
+                          <Search className="absolute left-2 top-2.5 h-4 w-4 text-gray-400" />
+                          <Input
+                            placeholder="Search leads by name or phone..."
+                            value={leadSearchTerm}
+                            onChange={(e) => setLeadSearchTerm(e.target.value)}
+                            className="pl-8 h-9"
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </div>
+                      </div>
+                      {selectableLeads
+                        .filter((lead) => {
+                          const term = leadSearchTerm.trim().toLowerCase();
+                          if (!term) return true;
+                          const name = String(lead.leadName ?? "").toLowerCase();
+                          const phone = String(lead.contact ?? lead.phone ?? "");
+                          const email = String(lead.emailId ?? lead.email ?? "").toLowerCase();
+                          return (
+                            name.includes(term) ||
+                            phone.includes(term) ||
+                            email.includes(term)
+                          );
+                        })
+                        .map((lead) => {
+                          const label = [
+                            String(lead.leadName ?? "Unnamed lead"),
+                            lead.contact ? `• ${lead.contact}` : "",
+                            lead.course ? `• ${lead.course}` : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ");
+                          return (
+                            <SelectItem key={String(lead.id)} value={String(lead.id)}>
+                              {label}
+                            </SelectItem>
+                          );
+                        })}
+                      {selectableLeads.length === 0 && (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">
+                          No open leads found. Add a lead first to create a student.
+                        </div>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {selectedLeadId ? (
+                    <p className="text-xs text-blue-700">
+                      Lead selected — name and contact are locked. Course defaults from the lead but
+                      you can change it below. Saving will convert this lead to a student.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-amber-700">
+                      Select a lead above to auto-fill student details. Manual entry is not allowed.
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="space-y-2">
                 <Label htmlFor="srNo">Serial Number</Label>
                 <Input
@@ -919,7 +1286,10 @@ export default function StudentForm({
                   id="studentFullName"
                   {...form.register("studentFullName")}
                   value={form.watch("studentFullName") || ""}
-                  placeholder="Enter student full name"
+                  placeholder={leadFieldPlaceholder ?? "Enter student full name"}
+                  disabled={isLeadIdentityLocked}
+                  readOnly={isLeadIdentityLocked}
+                  className={isLeadIdentityLocked ? "bg-gray-50 cursor-not-allowed" : undefined}
                 />
                 {form.formState.errors.studentFullName && (
                   <p className="text-sm text-red-500">{form.formState.errors.studentFullName.message}</p>
@@ -936,7 +1306,10 @@ export default function StudentForm({
                       type="email"
                       {...field}
                       value={field.value ?? ""}
-                      placeholder="Enter email address"
+                      placeholder={leadFieldPlaceholder ?? "Enter email address"}
+                      disabled={isLeadIdentityLocked}
+                      readOnly={isLeadIdentityLocked}
+                      className={isLeadIdentityLocked ? "bg-gray-50 cursor-not-allowed" : undefined}
                     />
                   )}
                 />
@@ -949,31 +1322,28 @@ export default function StudentForm({
                   id="phone"
                   {...form.register("phone")}
                   value={form.watch("phone") || ""}
-                  placeholder="Enter contact number"
+                  placeholder={leadFieldPlaceholder ?? "Enter contact number"}
+                  disabled={isLeadIdentityLocked}
+                  readOnly={isLeadIdentityLocked}
+                  className={isLeadIdentityLocked ? "bg-gray-50 cursor-not-allowed" : undefined}
                 />
                 {form.formState.errors.phone && (
                   <p className="text-sm text-red-500">{form.formState.errors.phone.message}</p>
                 )}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="parentsContactNumber">Parents Contact</Label>
-                <Controller
-                  name="parentsContactNumber"
-                  control={form.control}
-                  render={({ field }) => (
-                    <Input
-                      id="parentsContactNumber"
-                      {...field}
-                      value={field.value ?? ""}
-                      placeholder="Enter parents contact number"
-                    />
-                  )}
-                />
-              </div>
-              <div className="space-y-2">
                 <Label htmlFor="source">Source</Label>
                 
-                {!showCustomSourceInput ? (
+                {isLeadIdentityLocked ? (
+                  <Input
+                    id="source"
+                    value={form.watch("source") || ""}
+                    placeholder={leadFieldPlaceholder ?? ""}
+                    disabled
+                    readOnly
+                    className="bg-gray-50 cursor-not-allowed"
+                  />
+                ) : !showCustomSourceInput ? (
                   <Select
                     value={form.watch("source") || ""}
                     onValueChange={(value) => {
@@ -1040,14 +1410,10 @@ export default function StudentForm({
                             try {
                               const newSource = await addCustomSource(customSourceInput.trim(), userProfile?.centreId);
                               if (newSource) {
-                                // Update local state directly to ensure immediate feedback
                                 setSources(prev => [newSource, ...prev]);
                                 form.setValue("source", newSource);
                                 setLastUsedSource(newSource);
-                                
-                                // Notify others
                                 sourceManagerEvents.notifySourceUpdate(newSource);
-                                
                                 toast({
                                   title: "Success",
                                   description: "Custom source added successfully!",
@@ -1079,6 +1445,24 @@ export default function StudentForm({
                   </div>
                 )}
               </div>
+              <div
+                className={isSupplementalDisabled ? "contents opacity-50 pointer-events-none" : "contents"}
+              >
+              <div className="space-y-2">
+                <Label htmlFor="parentsContactNumber">Parents Contact</Label>
+                <Controller
+                  name="parentsContactNumber"
+                  control={form.control}
+                  render={({ field }) => (
+                    <Input
+                      id="parentsContactNumber"
+                      {...field}
+                      value={field.value ?? ""}
+                      placeholder="Enter parents contact number"
+                    />
+                  )}
+                />
+              </div>
               <div className="space-y-2">
                 <Label htmlFor="admissionDate">Date of Admission</Label>
                 <Input
@@ -1097,9 +1481,10 @@ export default function StudentForm({
                   onValueChange={(value) => {
                     form.setValue("zicaZima", value);
                     setSelectedProgram(value);
-                    // Reset course and subcategory selection when program changes
-                    form.setValue("course", "");
-                    form.setValue("zicaSubCategory", "");
+                    if (!isLeadIdentityLocked) {
+                      form.setValue("course", "");
+                      form.setValue("zicaSubCategory", "");
+                    }
                   }}
                 >
                   <SelectTrigger id="zicaZima-select" className="w-full">
@@ -1155,8 +1540,26 @@ export default function StudentForm({
                 <Label htmlFor="course">
                   Course <span className="text-red-500">*</span>
                 </Label>
-                
-                {!showCustomCourseInput ? (
+                {isCreateMode && selectedLeadId && (
+                  <p className="text-xs text-gray-500">
+                    Pre-filled from the lead — change the course here if needed before saving.
+                  </p>
+                )}
+                {mode === "edit" && form.watch("course") && (
+                  <p className="text-xs text-gray-500">
+                    Course from enrollment / lead record — you can update it if needed.
+                  </p>
+                )}
+
+                {isSupplementalDisabled ? (
+                  <Input
+                    id="course"
+                    value=""
+                    placeholder="Select a lead above — course will default from the lead"
+                    disabled
+                    className="bg-gray-50 cursor-not-allowed"
+                  />
+                ) : !showCustomCourseInput ? (
                   <Select
                     value={form.watch("course") || ""}
                     onValueChange={(value) => {
@@ -1250,12 +1653,18 @@ export default function StudentForm({
                         onClick={async () => {
                           if (customCourseInput.trim()) {
                             try {
-                              // Save to Firestore
-                              await addDoc(collection(db, 'customCourses'), {
-                                courseName: customCourseInput.trim(),
-                                createdAt: Timestamp.now(),
-                                createdBy: userProfile?.uid || 'unknown'
-                              });
+                              if (usePostgresCrmRecords()) {
+                                await createCustomCourse(
+                                  customCourseInput.trim(),
+                                  userProfile?.centreId,
+                                );
+                              } else {
+                                await addDoc(collection(db, 'customCourses'), {
+                                  courseName: customCourseInput.trim(),
+                                  createdAt: Timestamp.now(),
+                                  createdBy: userProfile?.uid || 'unknown'
+                                });
+                              }
                               
                               // Update local state
                               setCustomCourses(prev => [...prev, customCourseInput.trim()]);
@@ -1375,6 +1784,9 @@ export default function StudentForm({
               <DollarSign className="w-5 h-5 text-green-600" />
               Fees Information
             </h3>
+            <p className="text-xs text-blue-700">
+              Saving updates fee details in the Fees section. Generate receipts from the Fees section only.
+            </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="actualFees">Actual Fees (₹)</Label>
@@ -1439,9 +1851,9 @@ export default function StudentForm({
                     <SelectValue placeholder="Select payment mode" />
                   </SelectTrigger>
                   <SelectContent>
-                    {paymentModes.map((mode) => (
-                      <SelectItem key={mode} value={mode}>
-                        {mode}
+                    {paymentModes.map((paymentMode) => (
+                      <SelectItem key={paymentMode} value={paymentMode}>
+                        {paymentMode}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1467,7 +1879,7 @@ export default function StudentForm({
             <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
               <p className="text-sm text-blue-800">
                 {remainingInstallments > 0 && (
-                  <span className="block mt-1">
+                  <span className="block">
                     Installment amount: ₹{Math.round(feesBalance / remainingInstallments)} per installment
                   </span>
                 )}
@@ -1528,6 +1940,8 @@ export default function StudentForm({
             </div>
           </div>
 
+          </div>
+
           <DialogFooter className="gap-2">
             <Button
               type="button"
@@ -1537,7 +1951,7 @@ export default function StudentForm({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={saveMutation.isPending}>
+            <Button type="submit" disabled={saveMutation.isPending || isSupplementalDisabled}>
               {saveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {mode === "create" ? "Add Student" : "Update Student"}
             </Button>

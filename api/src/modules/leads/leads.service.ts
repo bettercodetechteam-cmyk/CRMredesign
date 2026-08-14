@@ -264,6 +264,19 @@ export class LeadsService {
     }
   }
 
+  async remove(actor: AuthUser, id: string): Promise<{ success: boolean; id: string }> {
+    const existing = await this.requireLeadForActor(actor, id);
+
+    if (existing.status === LeadStatus.converted || existing.convertedStudentId) {
+      throw new BadRequestException(
+        'Cannot delete a converted lead. Remove or archive the student record instead.',
+      );
+    }
+
+    await this.prisma.lead.delete({ where: { id } });
+    return { success: true, id };
+  }
+
   async changeStatus(
     actor: AuthUser,
     id: string,
@@ -510,13 +523,21 @@ export class LeadsService {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === 'P2002'
     ) {
-      const target = (error.meta?.target as string[] | undefined)?.join(', ');
-      if (target?.includes('phone') || target?.includes('centre_id')) {
+      const target = error.meta?.target;
+      const targetStr = (
+        Array.isArray(target) ? target.join(' ') : String(target ?? '')
+      ).toLowerCase();
+      if (targetStr.includes('phone') || targetStr.includes('centre_id')) {
         throw new ConflictException(
-          'A lead with this phone already exists for this centre',
+          'A lead with this phone number already exists for this centre',
         );
       }
-      throw new ConflictException('Duplicate value violates a unique constraint');
+      if (targetStr.includes('lead_no')) {
+        throw new ConflictException('Could not allocate a unique lead number. Please try again.');
+      }
+      throw new ConflictException(
+        'This lead conflicts with an existing record. Check the phone number and try again.',
+      );
     }
     throw error;
   }

@@ -1,12 +1,15 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
 } from '@nestjs/common';
+import { StudentStatus } from '@prisma/client';
 import {
   ApiBearerAuth,
   ApiOkResponse,
@@ -17,6 +20,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/auth-user.types';
 
+import { CreateStudentDto } from './dto/create-student.dto';
 import { ListStudentsQueryDto } from './dto/list-students-query.dto';
 import {
   AssignBatchDto,
@@ -30,6 +34,12 @@ import { StudentsService } from './students.service';
 @Controller('students')
 export class StudentsController {
   constructor(private readonly studentsService: StudentsService) {}
+
+  @Post()
+  @ApiOperation({ summary: 'Create a new student (direct admission)' })
+  create(@CurrentUser() user: AuthUser, @Body() dto: CreateStudentDto) {
+    return this.studentsService.create(user, dto);
+  }
 
   @Get()
   @ApiOperation({ summary: 'List students with filters' })
@@ -87,5 +97,14 @@ export class StudentsController {
     @Body() dto: AssignBatchDto,
   ) {
     return this.studentsService.assignBatch(user, id, dto);
+  }
+
+  @Delete(':id')
+  @ApiOperation({ summary: 'Drop student (soft delete — sets status to dropped)' })
+  remove(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.studentsService.changeStatus(user, id, { status: StudentStatus.dropped });
   }
 }

@@ -7,6 +7,7 @@ import helmet from "helmet";
 import cors from "cors";
 import { reminderScheduler } from "./services/reminderScheduler";
 import { initializeFirebaseAdmin } from "./firebaseConfig";
+import { logDevStackStatus } from "./devStackCheck";
 
 console.log("Env check:", {
   NODE_ENV: process.env.NODE_ENV,
@@ -150,5 +151,6 @@ app.use((req, res, next) => {
     log(`✅ Server running at http://localhost:${port}`);
     log(`✅ Environment: ${process.env.NODE_ENV || 'development'}`);
     log(`✅ Health check: http://localhost:${port}/api/health`);
+    void logDevStackStatus();
   });
 })();

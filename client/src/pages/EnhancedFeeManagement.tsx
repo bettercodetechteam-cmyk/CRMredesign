@@ -114,6 +114,18 @@ import { db } from '@/lib/firebase';
 import { firebaseListenerManager } from '@/lib/firebaseListenerManager';
 import { FirebaseService } from '@/lib/firebaseService';
 import { firebaseHelpers } from '@/lib/firebaseHelpers';
+import {
+  createFeeRecord,
+  createCustomCourse,
+  deleteFeeRecord,
+  deleteGstRecord,
+  listCustomCourses,
+  subscribeFeeRecords,
+  subscribeGstRecords,
+  updateFeeRecord,
+  updateGstRecord,
+  usePostgresCrmRecords,
+} from '@/lib/crmRecordsStore';
 import { resolveOrGenerateReceiptNumber, getReceiptFieldName, isUsableReceiptNumber, resolveReceiptBrand } from '@/lib/receiptCounterService';
 import {
   createGstRecordIfNotExists,
@@ -500,10 +512,15 @@ export default function EnhancedFeeManagement() {
     }
   });
 
-  // Load custom courses from Firestore
+  // Load custom courses
   useEffect(() => {
     const loadCustomCourses = async () => {
       try {
+        if (usePostgresCrmRecords()) {
+          const rows = await listCustomCourses(userProfile?.centreId);
+          setCustomCourses(rows.map((row) => row.courseName));
+          return;
+        }
         const customCoursesQuery = query(collection(db, 'customCourses'), orderBy('createdAt', 'desc'));
         const snapshot = await getDocs(customCoursesQuery);
         const loadedCourses = snapshot.docs.map(doc => doc.data().courseName);
@@ -513,7 +530,7 @@ export default function EnhancedFeeManagement() {
       }
     };
     loadCustomCourses();
-  }, []);
+  }, [userProfile?.centreId]);
 
   // Update courses based on selected program
   const zicaBettercode = feeForm.watch('zicaBettercode');
@@ -780,6 +797,10 @@ export default function EnhancedFeeManagement() {
         paymentMode: feeRecord.paymentMode || 'Cash',
         chequeNumber: feeRecord.chequeNumber || '',
         noOfInstallments: feeRecord.numberOfInstallments || 0,
+        installmentsPaid: Math.max(
+          0,
+          (feeRecord.numberOfInstallments || 0) - (feeRecord.balanceInstallments || 0),
+        ),
         balanceInstallments: feeRecord.balanceInstallments || 0,
         remainingInstallments: feeRecord.balanceInstallments || 0,
         dueDate: dueDate,
@@ -861,9 +882,6 @@ export default function EnhancedFeeManagement() {
 
       // Update Firestore with ALL relevant fields from the updatedRecord
       // This ensures receipt numbers and other fields updated in the dialog are saved
-      const feeDocRef = doc(db, 'fees', updatedRecord.id);
-      
-      // Prepare a clean update object by removing non-serializable or ID fields
       const { id, ...updateData } = updatedRecord;
       
       // Filter out functions or large nested objects if any
@@ -875,10 +893,18 @@ export default function EnhancedFeeManagement() {
         }
       });
 
-      await updateDoc(feeDocRef, {
-        ...cleanUpdateData,
-        updatedAt: updatedRecord.updatedAt
-      });
+      if (usePostgresCrmRecords()) {
+        await updateFeeRecord(updatedRecord.id, {
+          ...cleanUpdateData,
+          updatedAt: updatedRecord.updatedAt,
+        });
+      } else {
+        const feeDocRef = doc(db, 'fees', updatedRecord.id);
+        await updateDoc(feeDocRef, {
+          ...cleanUpdateData,
+          updatedAt: updatedRecord.updatedAt
+        });
+      }
       
       // Update local state immediately so This Month's Due reflects due-date / payment changes
       setFeeRecords((prev) =>
@@ -1207,6 +1233,35 @@ export default function EnhancedFeeManagement() {
     setLoadError(null);
 
     const loadFeeRecords = () => {
+      if (usePostgresCrmRecords()) {
+        unsubscribeFees = subscribeFeeRecords(centreId, (data) => {
+          try {
+            const processedRecords = data.map((record) => {
+              const safeData: any = { ...record };
+              const numericFields = [
+                'actualFees', 'discountedFees', 'feesPaid', 'feesBalance',
+                'registrationAmount', 'numberOfInstallments', 'balanceInstallments',
+                ...INSTALLMENT_AMOUNT_FIELDS,
+              ];
+              numericFields.forEach((field) => {
+                if (safeData[field] !== undefined) {
+                  safeData[field] = Number(safeData[field]) || 0;
+                }
+              });
+              safeData.createdAt = safeData.createdAt ? new Date(safeData.createdAt) : new Date();
+              safeData.updatedAt = safeData.updatedAt ? new Date(safeData.updatedAt) : new Date();
+              safeData.srNo = parseSerialNumber(record.srNo) || 0;
+              return safeData as FeeRecord;
+            });
+            setFeeRecords(processedRecords);
+            setIsLoading(false);
+          } catch (error) {
+            console.error('Error processing fee records:', error);
+          }
+        });
+        return;
+      }
+
       unsubscribeFees = firebaseListenerManager.subscribe('fees', (data) => {
         try {
           const processedRecords = data.map(record => {
@@ -1266,6 +1321,39 @@ export default function EnhancedFeeManagement() {
     };
 
     const loadGSTRecords = () => {
+      if (usePostgresCrmRecords()) {
+        unsubscribeGST = subscribeGstRecords(centreId, (data) => {
+          try {
+            const centreScoped = data.filter(
+              (record) => !centreId || record.centreId === centreId,
+            );
+            const processedGST = centreScoped.map((record) => {
+              let dateStr = '';
+              const d = record.date;
+              if (typeof d === 'string' && /^\d{4}-\d{2}/.test(d)) {
+                dateStr = d.split('T')[0];
+              } else if (record.month && record.year != null) {
+                const m = String(record.month).trim().toUpperCase();
+                const monthNames = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+                const mi = monthNames.indexOf(m);
+                const y = typeof record.year === 'number' ? record.year : parseInt(String(record.year), 10) || new Date().getFullYear();
+                if (mi >= 0) dateStr = `${y}-${String(mi + 1).padStart(2, '0')}-01`;
+              }
+              return {
+                ...record,
+                date: dateStr || record.date,
+                createdAt: record.createdAt ? new Date(String(record.createdAt)) : new Date(),
+                updatedAt: record.updatedAt ? new Date(String(record.updatedAt)) : new Date(),
+              };
+            });
+            setGstRecords(processedGST as GSTInvoiceRecord[]);
+          } catch (error) {
+            console.error('Error processing GST records:', error);
+          }
+        });
+        return;
+      }
+
       unsubscribeGST = firebaseListenerManager.subscribe('gstRecords', (data) => {
         try {
           const centreScoped = data.filter(
@@ -1862,7 +1950,11 @@ export default function EnhancedFeeManagement() {
       };
       
       // Create the fee record first
-      const docRef = await addDoc(collection(db, 'fees'), newRecord);
+      if (usePostgresCrmRecords()) {
+        await createFeeRecord(newRecord as unknown as Record<string, unknown>);
+      } else {
+        await addDoc(collection(db, 'fees'), newRecord);
+      }
       
       setIsAddDialogOpen(false);
       setNumberOfInstallments(0);
@@ -2030,12 +2122,21 @@ export default function EnhancedFeeManagement() {
             }
           } else if (operation.type === 'update' && operation.amount && operation.existingRecord) {
             const gstCalculation = calculateGST(operation.amount);
-            await updateDoc(doc(db, 'gstRecords', operation.existingRecord.id), {
-              totalInvoice: gstCalculation.total,
-              basicAmount: gstCalculation.basicAmount,
-              gst: gstCalculation.gst,
-              updatedAt: new Date()
-            });
+            if (usePostgresCrmRecords()) {
+              await updateGstRecord(operation.existingRecord.id, {
+                totalInvoice: gstCalculation.total,
+                basicAmount: gstCalculation.basicAmount,
+                gst: gstCalculation.gst,
+                updatedAt: new Date(),
+              });
+            } else {
+              await updateDoc(doc(db, 'gstRecords', operation.existingRecord.id), {
+                totalInvoice: gstCalculation.total,
+                basicAmount: gstCalculation.basicAmount,
+                gst: gstCalculation.gst,
+                updatedAt: new Date()
+              });
+            }
             
             // Update local state
             setGstRecords(prev => prev.map(record => 
@@ -2047,7 +2148,11 @@ export default function EnhancedFeeManagement() {
             gstOperationsCompleted++;
             console.log(`✅ GST record updated successfully for ${operation.installmentType}`);
           } else if (operation.type === 'delete' && operation.existingRecord) {
-            await deleteDoc(doc(db, 'gstRecords', operation.existingRecord.id));
+            if (usePostgresCrmRecords()) {
+              await deleteGstRecord(operation.existingRecord.id);
+            } else {
+              await deleteDoc(doc(db, 'gstRecords', operation.existingRecord.id));
+            }
             setGstRecords(prev => prev.filter(record => record.id !== operation.existingRecord!.id));
             gstOperationsCompleted++;
             console.log(`✅ GST record deleted successfully for ${operation.installmentType}`);
@@ -2058,10 +2163,11 @@ export default function EnhancedFeeManagement() {
       }
       
       // Check if the document exists before updating
-      const feeDocRef = doc(db, 'fees', editingRecord.id);
-      const feeDocSnap = await getDoc(feeDocRef);
-      
-      if (!feeDocSnap.exists()) {
+      const existingData = usePostgresCrmRecords()
+        ? (feeRecords.find((record) => record.id === editingRecord.id) as Record<string, unknown> | undefined)
+        : (await getDoc(doc(db, 'fees', editingRecord.id))).data();
+
+      if (!existingData) {
         console.error(`Fee record with ID ${editingRecord.id} does not exist`);
         toast({ 
           title: "Error", 
@@ -2072,7 +2178,6 @@ export default function EnhancedFeeManagement() {
       }
       
       // Check if update is necessary by comparing with existing record
-      const existingData = feeDocSnap.data();
       const existingFeesPaidDate = normalizeFeesPaidDateForCompare(existingData.feesPaidDate);
       const updatedFeesPaidDate = normalizeFeesPaidDateForCompare((updatedRecord as any).feesPaidDate);
       const hasSignificantChanges = 
@@ -2086,8 +2191,11 @@ export default function EnhancedFeeManagement() {
       
       // Only update if there are significant changes
       if (hasSignificantChanges) {
-        // Update the fee record
-        await updateDoc(feeDocRef, updatedRecord);
+        if (usePostgresCrmRecords()) {
+          await updateFeeRecord(editingRecord.id, updatedRecord as unknown as Record<string, unknown>);
+        } else {
+          await updateDoc(doc(db, 'fees', editingRecord.id), updatedRecord);
+        }
         
         // Sync student record when fee record is updated (only if significant changes)
         if (editingRecord.studentId) {
@@ -2129,8 +2237,12 @@ export default function EnhancedFeeManagement() {
 
   const handleSaveRemarkOnly = async (recordId: string, newRemark: string) => {
     try {
-      const feeDocRef = doc(db, 'fees', recordId);
-      await updateDoc(feeDocRef, { remarks: newRemark });
+      if (usePostgresCrmRecords()) {
+        await updateFeeRecord(recordId, { remarks: newRemark });
+      } else {
+        const feeDocRef = doc(db, 'fees', recordId);
+        await updateDoc(feeDocRef, { remarks: newRemark });
+      }
       setFeeRecords(prev =>
         prev.map(r => (r.id === recordId ? { ...r, remarks: newRemark } : r))
       );
@@ -2159,26 +2271,38 @@ export default function EnhancedFeeManagement() {
         return filtered;
       });
 
-      // Delete from Firebase
-      const feeRef = doc(db, 'fees', id);
-      
-      // Verify the document exists before deleting
-      const feeDoc = await getDoc(feeRef);
-      if (!feeDoc.exists()) {
-        console.warn('⚠️ Fee record not found for deletion:', id);
-        toast({
-          title: "Warning",
-          description: "Fee record not found or already deleted.",
-          variant: "destructive",
-        });
-        // Refresh to sync state
-        return;
+      // Delete from database
+      let feeData: Record<string, unknown>;
+      if (usePostgresCrmRecords()) {
+        const existing = feeRecords.find((record) => record.id === id);
+        if (!existing) {
+          console.warn('⚠️ Fee record not found for deletion:', id);
+          toast({
+            title: "Warning",
+            description: "Fee record not found or already deleted.",
+            variant: "destructive",
+          });
+          return;
+        }
+        feeData = existing as unknown as Record<string, unknown>;
+        await deleteFeeRecord(id);
+      } else {
+        const feeRef = doc(db, 'fees', id);
+        const feeDoc = await getDoc(feeRef);
+        if (!feeDoc.exists()) {
+          console.warn('⚠️ Fee record not found for deletion:', id);
+          toast({
+            title: "Warning",
+            description: "Fee record not found or already deleted.",
+            variant: "destructive",
+          });
+          return;
+        }
+        feeData = feeDoc.data() as Record<string, unknown>;
+        await deleteDoc(feeRef);
       }
 
       console.log('✅ Fee record found, proceeding with deletion');
-      
-      // Handle receipt counters decrement
-      const feeData = feeDoc.data();
       const receiptFields = [
         'registrationReceiptNumber',
         'fullPaymentReceiptNumber',
@@ -2241,9 +2365,12 @@ export default function EnhancedFeeManagement() {
         await decrementReceiptCounter(db, 'ZICA', count, date);
       }
       
-      // Delete the document
-      await deleteDoc(feeRef);
-      console.log('✅ Successfully deleted fee record from Firebase:', id);
+      // Delete the document (Firestore path only — Postgres deleted above)
+      if (!usePostgresCrmRecords()) {
+        const feeRef = doc(db, 'fees', id);
+        await deleteDoc(feeRef);
+      }
+      console.log('✅ Successfully deleted fee record:', id);
 
       toast({ 
         title: "Success", 
@@ -2370,7 +2497,11 @@ If you have already made the payment, please ignore this message. For any clarif
   // CRUD Operations for GST Records
   const handleDeleteGSTRecord = async (gstRecordId: string) => {
     try {
-      await deleteDoc(doc(db, 'gstRecords', gstRecordId));
+      if (usePostgresCrmRecords()) {
+        await deleteGstRecord(gstRecordId);
+      } else {
+        await deleteDoc(doc(db, 'gstRecords', gstRecordId));
+      }
       setGstRecords(prev => prev.filter(record => record.id !== gstRecordId));
       toast({ title: "Success", description: "GST record deleted successfully!" });
     } catch (error) {
@@ -2381,8 +2512,12 @@ If you have already made the payment, please ignore this message. For any clarif
 
   const handleDeleteAllGSTRecordsForMonth = async (monthData: { month: string; records: GSTInvoiceRecord[] }) => {
     try {
-      const deletePromises = monthData.records.map(record => deleteDoc(doc(db, 'gstRecords', record.id)));
-      await Promise.all(deletePromises);
+      if (usePostgresCrmRecords()) {
+        await Promise.all(monthData.records.map((record) => deleteGstRecord(record.id)));
+      } else {
+        const deletePromises = monthData.records.map(record => deleteDoc(doc(db, 'gstRecords', record.id)));
+        await Promise.all(deletePromises);
+      }
       
       const deletedIds = monthData.records.map(r => r.id);
       setGstRecords(prev => prev.filter(record => !deletedIds.includes(record.id)));
@@ -2396,10 +2531,14 @@ If you have already made the payment, please ignore this message. For any clarif
 
   const handleEditGSTRecord = async (gstRecordId: string, updatedData: Partial<GSTInvoiceRecord>) => {
     try {
-      await updateDoc(doc(db, 'gstRecords', gstRecordId), {
-        ...updatedData,
-        updatedAt: new Date()
-      });
+      if (usePostgresCrmRecords()) {
+        await updateGstRecord(gstRecordId, { ...updatedData, updatedAt: new Date() });
+      } else {
+        await updateDoc(doc(db, 'gstRecords', gstRecordId), {
+          ...updatedData,
+          updatedAt: new Date()
+        });
+      }
       setGstRecords(prev => prev.map(record => 
         record.id === gstRecordId ? { ...record, ...updatedData, updatedAt: new Date() } : record
       ));
@@ -2439,7 +2578,11 @@ If you have already made the payment, please ignore this message. For any clarif
         if (isNaN(d.getTime())) continue;
         const month = d.toLocaleString('default', { month: 'long' }).toUpperCase();
         const year = d.getFullYear();
-        await updateDoc(doc(db, 'gstRecords', gstRecord.id), { date: dateStr, month, year, updatedAt: new Date() });
+        if (usePostgresCrmRecords()) {
+          await updateGstRecord(gstRecord.id, { date: dateStr, month, year, updatedAt: new Date() });
+        } else {
+          await updateDoc(doc(db, 'gstRecords', gstRecord.id), { date: dateStr, month, year, updatedAt: new Date() });
+        }
         setGstRecords(prev => prev.map(r => r.id === gstRecord.id ? { ...r, date: dateStr, month, year, updatedAt: new Date() } : r));
         updated++;
       }
@@ -2738,7 +2881,11 @@ If you have already made the payment, please ignore this message. For any clarif
 
       // Delete duplicate records from Firebase
       for (const recordId of uniqueDuplicatesToDelete) {
-        await deleteDoc(doc(db, 'gstRecords', recordId));
+        if (usePostgresCrmRecords()) {
+          await deleteGstRecord(recordId);
+        } else {
+          await deleteDoc(doc(db, 'gstRecords', recordId));
+        }
         console.log(`Deleted record with ID: ${recordId}`);
       }
 
@@ -3802,12 +3949,18 @@ If you have already made the payment, please ignore this message. For any clarif
                         onClick={async () => {
                           if (customCourseInput.trim()) {
                             try {
-                              // Save to Firestore
-                              await addDoc(collection(db, 'customCourses'), {
-                                courseName: customCourseInput.trim(),
-                                createdAt: Timestamp.now(),
-                                createdBy: userProfile?.uid || 'unknown'
-                              });
+                              if (usePostgresCrmRecords()) {
+                                await createCustomCourse(
+                                  customCourseInput.trim(),
+                                  userProfile?.centreId,
+                                );
+                              } else {
+                                await addDoc(collection(db, 'customCourses'), {
+                                  courseName: customCourseInput.trim(),
+                                  createdAt: Timestamp.now(),
+                                  createdBy: userProfile?.uid || 'unknown'
+                                });
+                              }
                               
                               // Update local state
                               setCustomCourses(prev => [...prev, customCourseInput.trim()]);

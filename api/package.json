@@ -16,6 +16,7 @@
     "prisma:studio": "prisma studio",
     "prisma:seed": "prisma db seed",
     "db:seed:reference": "ts-node --transpile-only prisma/seed-reference-data.ts",
+    "db:seed:workflow": "ts-node --transpile-only prisma/seed-crm-workflow.ts",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f postgres",

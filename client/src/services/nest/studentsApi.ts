@@ -6,13 +6,21 @@ export interface NestStudent {
   rollNo: string;
   centreId: string;
   courseId: string;
+  leadId?: string | null;
   batchId: string | null;
   firstName: string;
   lastName: string | null;
   phone: string;
   email: string | null;
+  parentName?: string | null;
+  parentPhone?: string | null;
+  address?: string | null;
   status: string;
   admissionDate: string;
+  createdAt?: string;
+  updatedAt?: string;
+  metadata?: Record<string, unknown> | null;
+  course?: { id?: string; name?: string; code?: string; durationMonths?: number };
 }
 
 export const nestStudentsApi = {
@@ -24,6 +32,9 @@ export const nestStudentsApi = {
   getByRoll: (rollNo: string) =>
     nestApi.get<NestStudent>(`/students/by-roll/${encodeURIComponent(rollNo)}`),
 
+  create: (body: Record<string, unknown>) =>
+    nestApi.post<NestStudent>('/students', body),
+
   update: (id: string, body: Record<string, unknown>) =>
     nestApi.patch<NestStudent>(`/students/${id}`, body),
 
@@ -32,4 +43,6 @@ export const nestStudentsApi = {
 
   assignBatch: (id: string, batchId: string | null) =>
     nestApi.patch<NestStudent>(`/students/${id}/batch`, { batchId }),
+
+  remove: (id: string) => nestApi.delete<NestStudent>(`/students/${id}`),
 };

@@ -61,6 +61,6 @@ export class FirebaseAdminService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    return this.auth.verifyIdToken(idToken, true);
+    return this.auth.verifyIdToken(idToken);
   }
 }

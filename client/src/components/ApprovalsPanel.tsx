@@ -1,6 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import { collection, getDocs, query, where } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -28,6 +26,7 @@ import { InlineLoading } from '@/components/ui/loading';
 import { ASSIGNABLE_ROLES } from '@shared/permissions';
 import { approveUser, rejectUser } from '@/lib/iamService';
 import { ROLE_NAMES } from '@/lib/types';
+import { nestUsersApi } from '@/services/nest/usersApi';
 
 interface PendingUser {
   id: string;
@@ -54,12 +53,18 @@ export default function ApprovalsPanel() {
 
     const fetchPendingUsers = async () => {
       try {
-        const usersRef = collection(db, 'users');
-        const q = query(usersRef, where('approved', '==', false));
-        const snapshot = await getDocs(q);
-        const users = snapshot.docs
-          .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
-          .filter((user: any) => user.approved === false && !user.rejected) as PendingUser[];
+        const result = await nestUsersApi.list({ approved: false, limit: 100 });
+        const users = result.items
+          .filter((user) => user.approved === false)
+          .map((user) => ({
+            id: user.id,
+            firstName: user.firstName,
+            lastName: user.lastName ?? '',
+            email: user.email,
+            role: user.role,
+            approved: user.approved,
+            createdAt: user.createdAt,
+          })) as PendingUser[];
         setPendingUsers(users);
         setSelectedRoles((prev) => {
           const next = { ...prev };

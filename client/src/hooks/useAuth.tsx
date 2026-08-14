@@ -10,6 +10,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, addDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
+import { isPostgresPrimary, nestApi } from '@/lib/nestApi';
 
 import type { ModulePermission } from '@shared/permissions';
 
@@ -65,9 +66,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
+  const fetchPostgresProfile = async (uid: string): Promise<Partial<UserProfile> | null> => {
+    if (!isPostgresPrimary()) return null;
+    try {
+      const me = await nestApi.get<{
+        id: string;
+        firebaseUid: string;
+        email: string;
+        firstName: string;
+        lastName: string | null;
+        role: string;
+        centreId: string | null;
+        approved: boolean;
+        permissionsGranted?: string[];
+        permissionsRevoked?: string[];
+      }>('/auth/me');
+
+      return {
+        id: uid,
+        uid,
+        email: me.email,
+        firstName: me.firstName,
+        lastName: me.lastName ?? '',
+        role: me.role,
+        centreId: me.centreId ?? undefined,
+        approved: me.approved,
+        permissionsGranted: (me.permissionsGranted ?? []) as ModulePermission[],
+        permissionsRevoked: (me.permissionsRevoked ?? []) as ModulePermission[],
+      };
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error('❌ Error fetching Postgres user profile:', error);
+      }
+      return null;
+    }
+  };
+
   const fetchUserProfile = async (uid: string): Promise<UserProfile | null> => {
     if (!db) {
-      console.warn('⚠️ Firebase Firestore is not initialized. Cannot fetch user profile.');
+      const postgresOnly = await fetchPostgresProfile(uid);
+      if (postgresOnly?.email) {
+        return {
+          id: uid,
+          uid,
+          email: postgresOnly.email,
+          firstName: postgresOnly.firstName ?? 'User',
+          lastName: postgresOnly.lastName ?? '',
+          role: postgresOnly.role ?? 'pending',
+          centreId: postgresOnly.centreId,
+          approved: postgresOnly.approved,
+          permissionsGranted: [],
+          permissionsRevoked: [],
+        };
+      }
+      console.warn('⚠️ Firestore is not initialized and Postgres profile was not found.');
       return null;
     }
     
@@ -77,23 +129,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (userDoc.exists()) {
         const data = userDoc.data();
         const approvedStatus = data.approved === true;
+        const postgresProfile = await fetchPostgresProfile(uid);
+        const legacyCentreId =
+          typeof data.centreId === 'string' && data.centreId.trim()
+            ? data.centreId
+            : undefined;
 
         const profile = {
           id: uid,
           uid,
-          email: data.email,
-          firstName: data.firstName,
-          lastName: data.lastName,
-          role: data.role,
-          centreId: data.centreId || 'default-centre',
+          email: postgresProfile?.email ?? data.email,
+          firstName: postgresProfile?.firstName ?? data.firstName,
+          lastName: postgresProfile?.lastName ?? data.lastName,
+          role: postgresProfile?.role ?? data.role,
+          centreId:
+            postgresProfile?.centreId ??
+            (isPostgresPrimary() ? legacyCentreId : legacyCentreId ?? 'default-centre'),
           createdAt: data.createdAt?.toDate?.() ?? data.createdAt,
           updatedAt: data.updatedAt?.toDate?.() ?? data.updatedAt,
-          approved: approvedStatus,
+          approved: postgresProfile?.approved ?? approvedStatus,
           permissionsGranted: data.permissionsGranted ?? [],
           permissionsRevoked: data.permissionsRevoked ?? [],
         };
 
         return profile;
+      }
+
+      const postgresOnly = await fetchPostgresProfile(uid);
+      if (postgresOnly?.email) {
+        return {
+          id: uid,
+          uid,
+          email: postgresOnly.email,
+          firstName: postgresOnly.firstName ?? 'User',
+          lastName: postgresOnly.lastName ?? '',
+          role: postgresOnly.role ?? 'pending',
+          centreId: postgresOnly.centreId,
+          approved: postgresOnly.approved,
+          permissionsGranted: [],
+          permissionsRevoked: [],
+        };
       }
 
       return null;
@@ -127,13 +202,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const ensureUserProfile = async (firebaseUser: FirebaseUser): Promise<UserProfile | null> => {
+    // PostgreSQL is primary: always sync Firebase user into Postgres before Nest API calls.
+    if (isPostgresPrimary()) {
+      try {
+        await bootstrapUserProfile(firebaseUser);
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.error('Postgres profile bootstrap failed:', error);
+        }
+      }
+    }
+
     let profile = await fetchUserProfile(firebaseUser.uid);
     if (profile) {
       return profile;
     }
 
-    await bootstrapUserProfile(firebaseUser);
-    profile = await fetchUserProfile(firebaseUser.uid);
+    if (!isPostgresPrimary()) {
+      await bootstrapUserProfile(firebaseUser);
+      profile = await fetchUserProfile(firebaseUser.uid);
+    }
     return profile;
   };
 
@@ -191,6 +279,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (userProfile.approved === false) {
+        if (isPostgresPrimary()) {
+          return;
+        }
         await firebaseSignOut(auth);
         throw new Error('Your account is pending approval. Please contact your administrator.');
       }

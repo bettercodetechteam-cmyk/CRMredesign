@@ -5,6 +5,16 @@ import { db } from '@/lib/firebase';
 import { resolveOrGenerateReceiptNumber, isZicaReceiptLayout } from '@/lib/receiptCounterService';
 import { Printer, Download } from 'lucide-react';
 import { ReceiptTemplate, ReceiptData } from '@/components/receipts/ReceiptTemplate';
+import {
+  buildReceiptLoadKey,
+  buildReceiptPdfFilename,
+  downloadReceiptAsPdf,
+  fetchFeeRecordForReceipt,
+  loadCachedReceiptDraft,
+  resolveReceiptNumberFromFeeData,
+  cacheReceiptDraft,
+} from '@/lib/feeReceiptUtils';
+import { usePostgresCrmRecords } from '@/lib/crmRecordsStore';
 
 
 
@@ -13,6 +23,9 @@ export default function ReceiptPage() {
   const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const receiptRef = useRef<HTMLDivElement>(null);
+  const autoDownloadTriggered = useRef(false);
 
   // IMPORTANT: URLSearchParams object identity is not stable across renders,
   // so depend on its string value, not the object reference.
@@ -20,9 +33,10 @@ export default function ReceiptPage() {
   const feeId = useMemo(() => new URLSearchParams(searchKey).get('feeId') || '', [searchKey]);
   const receiptType = useMemo(() => new URLSearchParams(searchKey).get('type') || 'full', [searchKey]);
   const urlAmount = useMemo(() => new URLSearchParams(searchKey).get('amount'), [searchKey]);
+  const autoDownload = useMemo(() => new URLSearchParams(searchKey).get('download') === '1', [searchKey]);
 
   const loadKey = useMemo(() => {
-    return `${feeId}|${receiptType}|${urlAmount ?? ''}`;
+    return buildReceiptLoadKey(feeId, receiptType, urlAmount ?? '');
   }, [feeId, receiptType, urlAmount]);
 
   const lastLoadKeyRef = useRef<string | null>(null);
@@ -43,67 +57,22 @@ export default function ReceiptPage() {
         setErrorMessage(null);
         setLoading(true);
 
-        // If we have a cached snapshot from the opener (FeeDetailsDialog), prefer it first
-        // to avoid ANY Firestore reads in the receipt tab.
-        let cachedFeeData: Record<string, unknown> | null = null;
-        try {
-          const raw = sessionStorage.getItem(`receiptDraft:${loadKey}`);
-          if (raw) {
-            const parsed = JSON.parse(raw) as { feeData?: Record<string, unknown> };
-            cachedFeeData = parsed?.feeData ?? null;
-          }
-        } catch {
-          // ignore cache parse errors
-        }
-
-        const resolveReceiptNumberFromData = (data: Record<string, unknown> | null, type: string): string => {
-          if (!data) return '';
-          
-          // 1. Try field-specific receipt number first
-          const fieldName = resolveReceiptFieldName(type);
-          if (fieldName && typeof data[fieldName] === 'string' && data[fieldName]) {
-            return data[fieldName] as string;
-          }
-
-          // 2. Fallback to general receipt fields for compatibility
-          return (
-            (typeof data.fullPaymentReceiptNumber === 'string' && data.fullPaymentReceiptNumber) ||
-            (typeof data.registrationReceiptNumber === 'string' && data.registrationReceiptNumber) ||
-            (typeof data.receiptNumber === 'string' && data.receiptNumber) ||
-            ''
-          );
-        };
-
-        const resolveReceiptFieldName = (type: string): string | null => {
-          if (type === 'onetime' || type === 'direct' || type === 'registration') {
-            return 'registrationReceiptNumber';
-          }
-          if (type.startsWith('installment')) {
-            const n = type.replace('installment', '').padStart(2, '0');
-            return `installment${n}ReceiptNumber`;
-          }
-          if (type === 'full') {
-            return 'fullPaymentReceiptNumber';
-          }
-          return null;
-        };
-
-        const cachedReceiptNumber = resolveReceiptNumberFromData(cachedFeeData, receiptType);
+        let cachedFeeData = loadCachedReceiptDraft(loadKey);
+        const cachedReceiptNumber = resolveReceiptNumberFromFeeData(cachedFeeData, receiptType);
 
         let receiptNumber: string = cachedReceiptNumber;
         let feeData: Record<string, unknown> | null = cachedFeeData;
 
-        // For installment receipts, always fetch from Firestore to ensure we have latest late fees data
-        // (cache may have been set before payment was confirmed with late fees)
-        const isInstallment = receiptType.startsWith('installment');
-        const shouldHitFirestore = !feeData || !receiptNumber || isInstallment;
+        const needsRemoteFetch = !feeData || !receiptNumber;
 
         const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-        const resolveWithBackoff = async (): Promise<{ receiptNumber: string; feeData: Record<string, unknown> }> => {
+        const resolveWithBackoff = async (
+          currentData: Record<string, unknown>,
+        ): Promise<{ receiptNumber: string; feeData: Record<string, unknown> }> => {
           const maxAttempts = 3;
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
-              return await resolveOrGenerateReceiptNumber(db, feeId, receiptType);
+              return await resolveOrGenerateReceiptNumber(db, feeId, receiptType, currentData);
             } catch (err: unknown) {
               const message = err instanceof Error ? err.message : String(err);
               const code = (err as { code?: unknown })?.code;
@@ -119,24 +88,35 @@ export default function ReceiptPage() {
 
               if (!isRateLimited || attempt === maxAttempts - 1) throw err;
 
-              // Exponential backoff: 800ms, 1600ms, 3200ms
               const delay = 800 * Math.pow(2, attempt);
               await sleep(delay);
             }
           }
-          // unreachable
           throw new Error('Failed to resolve receipt number');
         };
 
         try {
-          if (shouldHitFirestore) {
-            const resolved = await resolveWithBackoff();
-            receiptNumber = resolved.receiptNumber;
-            feeData = resolved.feeData;
+          if (needsRemoteFetch) {
+            feeData = feeData ?? (await fetchFeeRecordForReceipt(feeId));
+            const existingNumber = resolveReceiptNumberFromFeeData(feeData, receiptType);
+            if (existingNumber) {
+              receiptNumber = existingNumber;
+            } else {
+              const resolved = await resolveWithBackoff(feeData);
+              receiptNumber = resolved.receiptNumber;
+              feeData = resolved.feeData;
+            }
+            cacheReceiptDraft(loadKey, feeData);
+          } else if (usePostgresCrmRecords() && receiptType.startsWith('installment')) {
+            // Refresh installment late-fee fields from server when cache may be stale
             try {
-              sessionStorage.setItem(`receiptDraft:${loadKey}`, JSON.stringify({ feeData }));
+              const fresh = await fetchFeeRecordForReceipt(feeId);
+              feeData = { ...feeData, ...fresh };
+              const freshNumber = resolveReceiptNumberFromFeeData(feeData, receiptType);
+              if (freshNumber) receiptNumber = freshNumber;
+              cacheReceiptDraft(loadKey, feeData);
             } catch {
-              // ignore sessionStorage errors
+              // Keep cached data if refresh fails
             }
           }
         } catch (error: unknown) {
@@ -153,7 +133,6 @@ export default function ReceiptPage() {
             message.toLowerCase().includes('too many');
 
           if (isRateLimited && cachedFeeData) {
-            // Use cached data so the UI can still render during rate limiting.
             feeData = cachedFeeData;
             receiptNumber = cachedReceiptNumber || 'N/A';
           } else {
@@ -395,9 +374,31 @@ export default function ReceiptPage() {
     window.print();
   };
 
-  const handleDownload = () => {
-    window.print();
+  const handleDownload = async () => {
+    if (!receiptRef.current || !receiptData) return;
+    try {
+      setDownloadingPdf(true);
+      const filename = buildReceiptPdfFilename(
+        receiptData.studentName,
+        receiptData.receiptNumber,
+      );
+      await downloadReceiptAsPdf(receiptRef.current, filename);
+    } catch (error) {
+      console.error('PDF download failed:', error);
+      window.print();
+    } finally {
+      setDownloadingPdf(false);
+    }
   };
+
+  useEffect(() => {
+    if (!autoDownload || loading || !receiptData || autoDownloadTriggered.current) return;
+    autoDownloadTriggered.current = true;
+    const timer = window.setTimeout(() => {
+      void handleDownload();
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [autoDownload, loading, receiptData]);
 
   if (loading) {
     return (
@@ -688,9 +689,9 @@ export default function ReceiptPage() {
       `}</style>
 
       <div className="action-buttons no-print">
-        <button className="action-button" onClick={handleDownload}>
+        <button className="action-button" onClick={() => void handleDownload()} disabled={downloadingPdf}>
           <Download size={18} />
-          Download Receipt
+          {downloadingPdf ? 'Generating PDF...' : 'Download PDF'}
         </button>
         <button className="action-button" onClick={handlePrint}>
           <Printer size={18} />
@@ -700,6 +701,7 @@ export default function ReceiptPage() {
 
       <div className="receipt-page">
         <ReceiptTemplate 
+          ref={receiptRef}
           data={receiptData} 
           isZica={isZica} 
         />

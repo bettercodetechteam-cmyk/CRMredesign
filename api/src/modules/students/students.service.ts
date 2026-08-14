@@ -5,12 +5,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { LeadStatus, Prisma, StudentStatus } from '@prisma/client';
+import { FeePlanStatus, InstallmentStatus, LeadStatus, Prisma, StudentStatus } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthUser } from '../auth/auth-user.types';
 
 import { ConvertLeadDto } from './dto/convert-lead.dto';
+import { CreateStudentDto } from './dto/create-student.dto';
 import { ListStudentsQueryDto } from './dto/list-students-query.dto';
 import {
   AssignBatchDto,
@@ -52,6 +53,113 @@ export class StudentsService {
    * Atomic lead → student conversion:
    * allocate roll no → create student → mark lead converted → history/activity.
    */
+  async create(
+    actor: AuthUser,
+    dto: CreateStudentDto,
+  ): Promise<StudentWithRelations> {
+    const centreId = this.resolveWriteCentreId(actor, dto.centreId);
+    const centre = await this.prisma.centre.findFirst({
+      where: { id: centreId, isActive: true },
+    });
+    if (!centre) {
+      throw new BadRequestException('Centre not found or inactive');
+    }
+
+    const course = await this.prisma.course.findFirst({
+      where: { id: dto.courseId, isActive: true },
+    });
+    if (!course) {
+      throw new BadRequestException('Course not found or inactive');
+    }
+
+    if (dto.batchId) {
+      const batch = await this.prisma.batch.findFirst({
+        where: { id: dto.batchId },
+      });
+      if (!batch) {
+        throw new BadRequestException('Batch not found');
+      }
+      if (batch.centreId !== centreId) {
+        throw new BadRequestException('Batch belongs to a different centre');
+      }
+      if (batch.courseId !== course.id) {
+        throw new BadRequestException('Batch does not match the selected course');
+      }
+    }
+
+    const admissionDate = this.parseAdmissionDate(dto.admissionDate);
+    const firstName = dto.firstName.trim();
+    const lastName = dto.lastName?.trim() || null;
+    const phone = dto.phone;
+    const email = dto.email?.trim().toLowerCase() || null;
+
+    if (firstName.length < 2) {
+      throw new BadRequestException('firstName must be at least 2 characters');
+    }
+    if (!/^[6-9][0-9]{9}$/.test(phone)) {
+      throw new BadRequestException('phone must be a valid 10-digit Indian mobile');
+    }
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const roll = await this.rollNumbers.allocate(tx, {
+          courseId: course.id,
+          rollPrefix: course.rollPrefix,
+          durationMonths: course.durationMonths,
+          admissionDate,
+        });
+
+        const student = await tx.student.create({
+          data: {
+            rollNo: roll.rollNo,
+            rollCourseId: course.id,
+            rollYear: roll.rollYear,
+            rollMonth: roll.rollMonth,
+            durationStartMonth: roll.durationStartMonth,
+            durationEndMonth: roll.durationEndMonth,
+            rollSeq: roll.rollSeq,
+            centreId,
+            courseId: course.id,
+            batchId: dto.batchId ?? null,
+            leadId: null,
+            firstName,
+            lastName,
+            phone,
+            email,
+            parentName: dto.parentName?.trim() || null,
+            parentPhone: dto.parentPhone ?? null,
+            address: dto.address?.trim() || null,
+            admissionDate,
+            status: StudentStatus.active,
+            metadata: dto.metadata
+              ? (dto.metadata as Prisma.InputJsonValue)
+              : undefined,
+            createdById: actor.id,
+          },
+          include: studentInclude,
+        });
+        await this.createDefaultFeePlan(tx, {
+          studentId: student.id,
+          centreId,
+          courseFees: course.fees,
+          actorId: actor.id,
+          admissionDate,
+        });
+        return student;
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'Could not create student due to a unique constraint conflict',
+        );
+      }
+      throw error;
+    }
+  }
+
   async convertFromLead(
     actor: AuthUser,
     leadId: string,
@@ -162,7 +270,7 @@ export class StudentsService {
             status: LeadStatus.converted,
             convertedStudentId: student.id,
             convertedAt: new Date(),
-            courseInterestId: lead.courseInterestId ?? course.id,
+            courseInterestId: course.id,
             version: { increment: 1 },
           },
         });
@@ -185,6 +293,14 @@ export class StudentsService {
             summary: `Converted to student ${student.rollNo}`,
             details: `Student id ${student.id}`,
           },
+        });
+
+        await this.createDefaultFeePlan(tx, {
+          studentId: student.id,
+          centreId: lead.centreId,
+          courseFees: course.fees,
+          actorId: actor.id,
+          admissionDate,
         });
 
         return student;
@@ -283,6 +399,19 @@ export class StudentsService {
       data.parentPhone = dto.parentPhone || null;
     }
     if (dto.address !== undefined) data.address = dto.address?.trim() || null;
+    if (dto.courseId !== undefined) {
+      const course = await this.prisma.course.findFirst({
+        where: { id: dto.courseId, isActive: true },
+      });
+      if (!course) {
+        throw new BadRequestException('Course not found or inactive');
+      }
+      data.course = { connect: { id: dto.courseId } };
+      data.rollCourseId = course.id;
+    }
+    if (dto.metadata !== undefined) {
+      data.metadata = dto.metadata as Prisma.InputJsonValue;
+    }
 
     return this.prisma.student.update({
       where: { id },
@@ -397,11 +526,85 @@ export class StudentsService {
     return where;
   }
 
+  private resolveWriteCentreId(actor: AuthUser, requestedCentreId?: string): string {
+    if (actor.isDirector) {
+      if (requestedCentreId) return requestedCentreId;
+      if (actor.centreId) return actor.centreId;
+      throw new BadRequestException('centreId is required for director accounts without a default centre');
+    }
+
+    if (!actor.centreId) {
+      throw new ForbiddenException('Your account has no centre assigned');
+    }
+    if (requestedCentreId && requestedCentreId !== actor.centreId) {
+      throw new ForbiddenException('Cannot create records outside your centre');
+    }
+    return actor.centreId;
+  }
+
   private assertCanAccessCentre(actor: AuthUser, centreId: string): void {
     if (actor.isDirector) return;
     if (!actor.centreId || actor.centreId !== centreId) {
       throw new ForbiddenException('Record is outside your centre');
     }
+  }
+
+  private async createDefaultFeePlan(
+    tx: Prisma.TransactionClient,
+    input: {
+      studentId: string;
+      centreId: string;
+      courseFees: Prisma.Decimal | null;
+      actorId: string;
+      admissionDate: Date;
+    },
+  ): Promise<void> {
+    const total = Number(input.courseFees ?? 0);
+    if (!Number.isFinite(total) || total <= 0) return;
+
+    const first = Math.round((total / 3) * 100) / 100;
+    const second = first;
+    const third = Math.round((total - first - second) * 100) / 100;
+    const secondDue = new Date(input.admissionDate);
+    secondDue.setUTCMonth(secondDue.getUTCMonth() + 1);
+    const thirdDue = new Date(input.admissionDate);
+    thirdDue.setUTCMonth(thirdDue.getUTCMonth() + 2);
+
+    await tx.studentFee.create({
+      data: {
+        studentId: input.studentId,
+        centreId: input.centreId,
+        totalAmount: new Prisma.Decimal(total),
+        status: FeePlanStatus.active,
+        notes: 'Auto-created from course fee',
+        createdById: input.actorId,
+        installments: {
+          create: [
+            {
+              sequence: 1,
+              label: 'Admission',
+              amountDue: new Prisma.Decimal(first),
+              dueDate: input.admissionDate,
+              status: InstallmentStatus.pending,
+            },
+            {
+              sequence: 2,
+              label: 'Installment 2',
+              amountDue: new Prisma.Decimal(second),
+              dueDate: secondDue,
+              status: InstallmentStatus.pending,
+            },
+            {
+              sequence: 3,
+              label: 'Installment 3',
+              amountDue: new Prisma.Decimal(third),
+              dueDate: thirdDue,
+              status: InstallmentStatus.pending,
+            },
+          ],
+        },
+      },
+    });
   }
 
   private parseAdmissionDate(value?: string): Date {

@@ -1,13 +1,10 @@
 import { auth } from '@/lib/firebase';
 
 /**
- * NestJS CRM API client (Phase 8 cutover).
+ * NestJS CRM API client — PostgreSQL is the primary CRM database.
  *
  * Dev default goes through Vite proxy: /nest-api → http://localhost:4000
  * Override with VITE_NEST_API_URL (e.g. http://localhost:4000/api/v1).
- *
- * Nest success envelope: { success: true, data, statusCode, path, timestamp }
- * Nest error envelope:   { success: false, message, statusCode, ... }
  */
 
 export interface NestApiSuccess<T> {
@@ -48,16 +45,26 @@ function nestBaseUrl(): string {
   return '/nest-api/api/v1';
 }
 
+/** PostgreSQL via Nest API is the primary CRM storage (default on). */
+export function isPostgresPrimary(): boolean {
+  return String(import.meta.env.VITE_CRM_STORAGE ?? 'postgres').toLowerCase() !== 'firestore';
+}
+
+function nestFeatureEnabled(flag: string | undefined): boolean {
+  if (!isPostgresPrimary()) return false;
+  return String(flag ?? 'true').toLowerCase() === 'true';
+}
+
 export function isNestLeadsEnabled(): boolean {
-  return String(import.meta.env.VITE_USE_NEST_LEADS ?? 'false').toLowerCase() === 'true';
+  return nestFeatureEnabled(import.meta.env.VITE_USE_NEST_LEADS);
 }
 
 export function isNestDashboardEnabled(): boolean {
-  return String(import.meta.env.VITE_USE_NEST_DASHBOARD ?? 'false').toLowerCase() === 'true';
+  return nestFeatureEnabled(import.meta.env.VITE_USE_NEST_DASHBOARD);
 }
 
 export function isNestFeesEnabled(): boolean {
-  return String(import.meta.env.VITE_USE_NEST_FEES ?? 'false').toLowerCase() === 'true';
+  return nestFeatureEnabled(import.meta.env.VITE_USE_NEST_FEES);
 }
 
 async function authHeaders(): Promise<HeadersInit> {
@@ -103,9 +110,14 @@ async function nestRequest<T>(
 
   if (!response.ok || (payload as NestApiErrorBody).success === false) {
     const errorBody = payload as NestApiErrorBody;
+    const detail = Array.isArray(errorBody.errors)
+      ? errorBody.errors.join('; ')
+      : typeof errorBody.errors === 'string'
+        ? errorBody.errors
+        : undefined;
     throw new NestApiError(
       errorBody.statusCode ?? response.status,
-      errorBody.message || `Nest API error (${response.status})`,
+      detail || errorBody.message || `Nest API error (${response.status})`,
       errorBody.errors,
     );
   }
@@ -124,4 +136,5 @@ export const nestApi = {
     nestRequest<T>('POST', path, { body }),
   patch: <T>(path: string, body?: unknown) =>
     nestRequest<T>('PATCH', path, { body }),
+  delete: <T>(path: string) => nestRequest<T>('DELETE', path),
 };

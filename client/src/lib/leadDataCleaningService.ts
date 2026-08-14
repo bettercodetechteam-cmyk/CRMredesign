@@ -885,12 +885,16 @@ export function validateCleanedData(leadData: LeadData): { isValid: boolean; err
     }
   }
   
-  // Validate phone format
+  // Validate phone format (Nest API requires Indian mobile starting 6–9)
   if (leadData.contact && leadData.contact.trim() !== "") {
-    const phoneRegex = /^(\+\d{1,3})?\d{10,15}$/;
-    if (!phoneRegex.test(leadData.contact.replace(/[^\d+]/g, ""))) {
-      errors.push("Invalid phone number format");
+    const ten = leadData.contact.replace(/\D/g, '').slice(-10);
+    if (!/^[6-9][0-9]{9}$/.test(ten)) {
+      errors.push("Enter a valid 10-digit Indian mobile number (starting with 6–9)");
     }
+  }
+
+  if (leadData.leadName && leadData.leadName.trim().length === 1) {
+    errors.push("Lead name must be at least 2 characters");
   }
   
   return {

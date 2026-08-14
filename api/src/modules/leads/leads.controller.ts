@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -111,5 +112,18 @@ export class LeadsController {
     @Body() dto: CreateLeadActivityDto,
   ) {
     return this.leadsService.addActivity(user, id, dto);
+  }
+
+  @Delete(':id')
+  @ApiOperation({
+    summary: 'Delete a lead',
+    description: 'Cannot delete converted leads. Related history and activities are removed.',
+  })
+  @ApiOkResponse({ description: 'Lead deleted' })
+  remove(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.leadsService.remove(user, id);
   }
 }

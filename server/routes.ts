@@ -1,5 +1,5 @@
 ﻿import type { Express } from "express";
-import { createServer, type Server } from "http";
+import { createServer, type Server, request as httpRequest } from "http";
 import { storage } from "./storageFirebaseOnly";
 import ImageKit from "imagekit";
 import MappleIndiaService from "./services/mappleIndiaService";
@@ -16,7 +16,70 @@ import { s3StorageService } from "./services/s3Service";
 import { collection, doc, getDocs, query, updateDoc, where } from "firebase/firestore";
 import { db } from "./firebaseConfig";
 
+function registerNestApiProxy(app: Express): void {
+  const nestPort = Number(process.env.NEST_API_PORT || 4000);
+
+  app.use("/nest-api", (req, res) => {
+    const targetPath = req.url || "/";
+    const method = req.method ?? "GET";
+    const bodyWasConsumed = Boolean((req as { readableEnded?: boolean }).readableEnded);
+    const shouldForwardParsedBody =
+      bodyWasConsumed &&
+      method !== "GET" &&
+      method !== "HEAD" &&
+      req.body !== undefined &&
+      req.body !== null;
+    const bodyBuffer = shouldForwardParsedBody
+      ? Buffer.from(JSON.stringify(req.body), "utf8")
+      : null;
+
+    const headers: Record<string, string | string[] | undefined> = {
+      ...req.headers,
+      host: `localhost:${nestPort}`,
+    };
+    delete headers["content-length"];
+
+    if (bodyBuffer) {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(bodyBuffer.length);
+    }
+
+    const proxyReq = httpRequest(
+      {
+        hostname: "localhost",
+        port: nestPort,
+        path: targetPath,
+        method,
+        headers,
+      },
+      (proxyRes) => {
+        res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+        proxyRes.pipe(res);
+      },
+    );
+
+    proxyReq.on("error", (error) => {
+      if (!res.headersSent) {
+        res.status(502).json({
+          success: false,
+          message: "Nest CRM API is unavailable",
+          error: error instanceof Error ? error.message : "Proxy error",
+        });
+      }
+    });
+
+    if (bodyBuffer) {
+      proxyReq.end(bodyBuffer);
+      return;
+    }
+
+    req.pipe(proxyReq);
+  });
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
+  registerNestApiProxy(app);
+
   const toDate = (value: any): Date | null => {
     if (!value) return null;
     if (value instanceof Date) return value;
@@ -30,6 +93,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Health check endpoint
   app.get("/api/health", async (_req, res) => {
     try {
+      const { checkPostgresConnection } = await import("./services/postgresBootstrap");
+      const postgresConnected = await checkPostgresConnection();
+
       // Test Mapple India service
       const mappleTest = await MappleIndiaService.testConnection();
       
@@ -37,6 +103,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         status: "healthy",
         timestamp: new Date().toISOString(),
         services: {
+          postgres: postgresConnected ? "connected" : "not_configured",
           mappleIndia: mappleTest ? "connected" : "fallback",
           firebase: "connected",
           imagekit: "connected",

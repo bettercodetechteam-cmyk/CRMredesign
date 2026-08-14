@@ -1,5 +1,6 @@
 import type { LeadRecord } from '@/lib/centreDataStore';
 import type { NestLead } from '@/services/nest/leadsApi';
+import { nestCoursesApi } from '@/services/nest/coursesApi';
 
 /** UI label ← Nest LeadStatus */
 const NEST_STATUS_TO_UI: Record<string, string> = {
@@ -95,8 +96,19 @@ export function mapUiSourceToNest(source: string): string {
 /** Normalize to Indian 10-digit mobile for Nest validation. */
 export function normalizeNestPhone(value: unknown): string {
   const digits = String(value ?? '').replace(/\D/g, '');
-  if (digits.length >= 10) return digits.slice(-10);
-  return digits;
+  const ten = digits.length >= 10 ? digits.slice(-10) : digits;
+  return ten;
+}
+
+export function isValidNestPhone(value: unknown): boolean {
+  return /^[6-9][0-9]{9}$/.test(normalizeNestPhone(value));
+}
+
+function ensureNestFirstName(fullName: string): { firstName: string; lastName?: string } {
+  const { firstName, lastName } = splitLeadName(fullName);
+  const safeFirst =
+    firstName.length >= 2 ? firstName : firstName.length === 1 ? `${firstName}.` : 'Unknown';
+  return { firstName: safeFirst, lastName };
 }
 
 export function splitLeadName(fullName: string): { firstName: string; lastName?: string } {
@@ -104,6 +116,65 @@ export function splitLeadName(fullName: string): { firstName: string; lastName?:
   if (parts.length === 0) return { firstName: 'Unknown' };
   if (parts.length === 1) return { firstName: parts[0]! };
   return { firstName: parts[0]!, lastName: parts.slice(1).join(' ') };
+}
+
+let courseCache: Array<{ id: string; name: string; code: string }> | null = null;
+
+async function loadCourses(): Promise<Array<{ id: string; name: string; code: string }>> {
+  if (courseCache) return courseCache;
+  const collected: Array<{ id: string; name: string; code: string }> = [];
+  let page = 1;
+  let totalPages = 1;
+
+  while (page <= totalPages && page <= 20) {
+    const result = await nestCoursesApi.list({ limit: 100, page });
+    collected.push(
+      ...(result?.items ?? []).map((c) => ({
+        id: c.id,
+        name: c.name,
+        code: c.code,
+      })),
+    );
+    totalPages = result?.meta?.totalPages ?? 1;
+    page += 1;
+  }
+
+  courseCache = collected;
+  return courseCache;
+}
+
+/** Map UI course label → Postgres course id for lead/student writes. */
+export async function resolveCourseInterestId(courseLabel?: string): Promise<string | null> {
+  const label = String(courseLabel ?? '').trim();
+  if (!label) return null;
+  if (/^[0-9a-f-]{36}$/i.test(label)) return label;
+
+  const courses = await loadCourses();
+  const lower = label.toLowerCase();
+  const exact = courses.find(
+    (c) =>
+      c.name.toLowerCase() === lower ||
+      c.code.toLowerCase() === lower ||
+      c.name.toLowerCase().includes(lower) ||
+      lower.includes(c.name.toLowerCase()),
+  );
+  return exact?.id ?? null;
+}
+
+async function applyCourseToPayload(
+  payload: Record<string, unknown>,
+  input: { course?: string; courseInterestId?: string | null },
+): Promise<void> {
+  if (input.course?.trim()) {
+    const resolved = await resolveCourseInterestId(input.course);
+    if (resolved) {
+      payload.courseInterestId = resolved;
+      return;
+    }
+  }
+  if (input.courseInterestId && /^[0-9a-f-]{36}$/i.test(input.courseInterestId)) {
+    payload.courseInterestId = input.courseInterestId;
+  }
 }
 
 /**
@@ -150,6 +221,29 @@ export function mapNestLeadToUi(lead: NestLead & Record<string, unknown>): LeadR
   } as LeadRecord;
 }
 
+export async function buildNestCreatePayloadAsync(input: {
+  name: string;
+  phone: string;
+  email?: string;
+  source?: string;
+  status?: string;
+  notes?: string;
+  remark?: string;
+  nextFollowUpDate?: Date | string | null;
+  followUpDate?: Date | string | null;
+  course?: string;
+  courseInterestId?: string;
+  assignedToId?: string;
+  centreId?: string;
+}): Promise<Record<string, unknown>> {
+  const payload = buildNestCreatePayload(input);
+  await applyCourseToPayload(payload, {
+    course: input.course,
+    courseInterestId: input.courseInterestId,
+  });
+  return payload;
+}
+
 export function buildNestCreatePayload(input: {
   name: string;
   phone: string;
@@ -164,15 +258,19 @@ export function buildNestCreatePayload(input: {
   assignedToId?: string;
   centreId?: string;
 }): Record<string, unknown> {
-  const { firstName, lastName } = splitLeadName(input.name);
+  const { firstName, lastName } = ensureNestFirstName(input.name);
   const phone = normalizeNestPhone(input.phone);
+  if (!isValidNestPhone(phone)) {
+    throw new Error('Enter a valid 10-digit Indian mobile number (starting with 6–9).');
+  }
   const followUp = input.nextFollowUpDate || input.followUpDate;
-  const followUpIso =
-    followUp instanceof Date
-      ? followUp.toISOString()
-      : followUp
-        ? new Date(followUp).toISOString()
-        : undefined;
+  let followUpIso: string | undefined;
+  if (followUp) {
+    const parsed = followUp instanceof Date ? followUp : new Date(followUp);
+    if (!Number.isNaN(parsed.getTime())) {
+      followUpIso = parsed.toISOString();
+    }
+  }
 
   const payload: Record<string, unknown> = {
     firstName,
@@ -200,6 +298,29 @@ export function buildNestCreatePayload(input: {
     payload.status = 'new';
   }
 
+  return payload;
+}
+
+export async function buildNestUpdatePayloadAsync(input: {
+  name?: string;
+  phone?: string;
+  email?: string;
+  source?: string;
+  notes?: string;
+  remark?: string;
+  nextFollowUpDate?: Date | string | null;
+  followUpDate?: Date | string | null;
+  version?: number;
+  course?: string;
+  courseInterestId?: string | null;
+}): Promise<Record<string, unknown>> {
+  const payload = buildNestUpdatePayload(input);
+  if (input.course !== undefined || input.courseInterestId !== undefined) {
+    await applyCourseToPayload(payload, {
+      course: input.course,
+      courseInterestId: input.courseInterestId,
+    });
+  }
   return payload;
 }
 

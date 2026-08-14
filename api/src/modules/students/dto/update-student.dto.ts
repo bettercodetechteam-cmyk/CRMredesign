@@ -54,6 +54,17 @@ export class UpdateStudentDto {
   @IsString()
   @MaxLength(500)
   address?: string;
+
+  @ApiPropertyOptional({ description: 'Change enrolled course' })
+  @IsOptional()
+  @IsUUID()
+  courseId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Extended student profile fields (course, fees, zica/zima, etc.)',
+  })
+  @IsOptional()
+  metadata?: Record<string, unknown>;
 }
 
 export class ChangeStudentStatusDto {

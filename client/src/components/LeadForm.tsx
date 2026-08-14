@@ -43,11 +43,12 @@ import { cn } from "@/lib/utils";
 import { getNextSerialNumberFromItems } from "@/lib/serialNumberUtils";
 import { isNestLeadsEnabled } from "@/lib/nestApi";
 import {
-  buildNestCreatePayload,
-  buildNestUpdatePayload,
+  buildNestCreatePayloadAsync,
+  buildNestUpdatePayloadAsync,
   isNestBackedLead,
   mapNestLeadToUi,
   mapUiStatusToNest,
+  resolveCourseInterestId,
 } from "@/lib/nestLeadMapper";
 import { nestLeadsApi } from "@/services/nest/leadsApi";
 
@@ -1123,40 +1124,61 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
           const wantsConvert = leadData.status === 'Admission Done';
 
           if (mode === 'create') {
-            const created = await nestLeadsApi.create(
-              buildNestCreatePayload({
-                name: leadData.leadName,
-                phone: leadData.contact,
-                email: leadData.emailId,
-                source: leadData.source,
-                status: wantsConvert ? 'Hot Lead' : leadData.status,
-                notes: leadData.remark,
-                nextFollowUpDate: leadData.nextFollowUpDate,
-                centreId: userProfile?.centreId,
-                courseInterestId:
-                  typeof lead?.courseInterestId === 'string'
-                    ? lead.courseInterestId
-                    : undefined,
-              }),
-            );
+            const centreId = userProfile?.centreId;
+            const existingForPhone =
+              centreId && leadData.contact
+                ? await nestLeadsApi.findByPhone(centreId, leadData.contact)
+                : null;
+
+            const updatePayload = await buildNestUpdatePayloadAsync({
+              name: leadData.leadName,
+              phone: leadData.contact,
+              email: leadData.emailId,
+              source: leadData.source,
+              notes: leadData.remark,
+              nextFollowUpDate: leadData.nextFollowUpDate,
+              course: leadData.course || data.interestedCourse || '',
+              version: existingForPhone?.version,
+            });
+
+            const created = existingForPhone
+              ? await nestLeadsApi.update(existingForPhone.id, updatePayload)
+              : await nestLeadsApi.create(
+                  await buildNestCreatePayloadAsync({
+                    name: leadData.leadName,
+                    phone: leadData.contact,
+                    email: leadData.emailId,
+                    source: leadData.source,
+                    status: wantsConvert ? 'Hot Lead' : leadData.status,
+                    notes: leadData.remark,
+                    nextFollowUpDate: leadData.nextFollowUpDate,
+                    centreId,
+                    course: leadData.course || data.interestedCourse || '',
+                  }),
+                );
+
+            const mergedExisting = Boolean(existingForPhone);
 
             let finalLead = created;
+            let convertRollNo: string | undefined;
             if (wantsConvert) {
-              await nestLeadsApi.convert(created.id, {
+              const courseId = await resolveCourseInterestId(
+                leadData.course || data.interestedCourse || '',
+              );
+              const convertResult = await nestLeadsApi.convert(created.id, {
                 firstName: created.firstName,
                 lastName: created.lastName ?? undefined,
                 phone: created.phone,
                 email: created.email ?? undefined,
+                ...(courseId ? { courseId } : {}),
               });
-              finalLead = await nestLeadsApi.get(created.id);
+              convertRollNo = convertResult.rollNo;
+              finalLead = { ...created, status: 'converted' };
             }
 
             const ui = mapNestLeadToUi(finalLead as Parameters<typeof mapNestLeadToUi>[0]);
-            try {
-              await centreDataStore.refresh();
-            } catch (refreshError) {
-              console.warn('Lead saved via Nest but list refresh failed:', refreshError);
-            }
+            centreDataStore.upsertLead(ui);
+            centreDataStore.refreshInBackground();
             return {
               id: ui.id,
               leadName: ui.leadName,
@@ -1170,14 +1192,15 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
               followUpDate: ui.followUpDate,
               cleaningResult,
               nestBacked: true,
-              rollNo: wantsConvert ? (finalLead as { rollNo?: string }).rollNo : undefined,
+              rollNo: convertRollNo,
+              mergedExisting,
             };
           }
 
           if (lead?.id && isNestBackedLead(lead)) {
             const updated = await nestLeadsApi.update(
               lead.id,
-              buildNestUpdatePayload({
+              await buildNestUpdatePayloadAsync({
                 name: leadData.leadName,
                 phone: leadData.contact,
                 email: leadData.emailId,
@@ -1185,18 +1208,25 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
                 notes: leadData.remark,
                 nextFollowUpDate: leadData.nextFollowUpDate,
                 version: typeof lead.version === 'number' ? lead.version : undefined,
+                course: leadData.course || data.interestedCourse || '',
               }),
             );
 
             let finalLead = updated;
+            let convertRollNo: string | undefined;
             if (wantsConvert && lead.status !== 'Admission Done') {
-              await nestLeadsApi.convert(lead.id, {
+              const courseId = await resolveCourseInterestId(
+                leadData.course || data.interestedCourse || '',
+              );
+              const convertResult = await nestLeadsApi.convert(lead.id, {
                 firstName: updated.firstName,
                 lastName: updated.lastName ?? undefined,
                 phone: updated.phone,
                 email: updated.email ?? undefined,
+                ...(courseId ? { courseId } : {}),
               });
-              finalLead = await nestLeadsApi.get(lead.id);
+              convertRollNo = convertResult.rollNo;
+              finalLead = { ...updated, status: 'converted' };
             } else if (
               !wantsConvert &&
               leadData.status &&
@@ -1215,11 +1245,8 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
             }
 
             const ui = mapNestLeadToUi(finalLead as Parameters<typeof mapNestLeadToUi>[0]);
-            try {
-              await centreDataStore.refresh();
-            } catch (refreshError) {
-              console.warn('Lead saved via Nest but list refresh failed:', refreshError);
-            }
+            centreDataStore.upsertLead(ui);
+            centreDataStore.refreshInBackground();
             return {
               id: ui.id,
               leadName: ui.leadName,
@@ -1387,17 +1414,16 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
             });
           }
         } else {
-          // Create or update reminder if follow-up date is set
+          // Create or update reminder if follow-up date is set (non-blocking)
           if (data.followUpDate) {
             if (mode === "create") {
-              await reminderService.createReminderFromLead(data, 'followup');
+              void reminderService.createReminderFromLead(data, 'followup');
             } else {
-              // For edit mode, try to find existing reminder and update it
-              await reminderService.updateReminderFromLead(data);
+              void reminderService.updateReminderFromLead(data);
             }
           }
 
-          if (mode === "create" && leadId && !data?.nestBacked) {
+          if (mode === "create" && leadId && data?.nestBacked) {
             centreDataStore.upsertLead({
               id: String(leadId),
               leadName: data.leadName ?? '',
@@ -1416,14 +1442,35 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
               followUpDate: data.followUpDate ?? null,
               nextFollowUpDate: data.nextFollowUpDate ?? data.followUpDate ?? null,
             } as LeadRecord);
-            void centreDataStore.refresh();
+          } else if (mode === "create" && leadId && !data?.nestBacked) {
+            centreDataStore.upsertLead({
+              id: String(leadId),
+              leadName: data.leadName ?? '',
+              contact: data.contact ?? '',
+              emailId: data.emailId ?? '',
+              course: data.course ?? '',
+              source: data.source ?? '',
+              status: data.status ?? 'Not Contacted',
+              counselorName: data.counselorName ?? '',
+              remark: data.remark ?? '',
+              cityArea: data.cityArea ?? '',
+              enquiryDate: data.enquiryDate ?? new Date(),
+              createdAt: data.createdAt ?? new Date(),
+              updatedAt: data.updatedAt ?? new Date(),
+              centreId: data.centreId ?? userProfile?.centreId ?? 'unknown',
+              followUpDate: data.followUpDate ?? null,
+              nextFollowUpDate: data.nextFollowUpDate ?? data.followUpDate ?? null,
+            } as LeadRecord);
+            void centreDataStore.refreshInBackground();
           }
           
           toast({
             title: "Success",
             description: data.promotedFromEnquiry
               ? "Website enquiry converted to a full lead and saved successfully"
-              : `Lead ${mode === "create" ? "created" : "updated"} successfully${data.followUpDate ? ' with reminder' : ''}`,
+              : data.mergedExisting
+                ? `Existing lead with this phone was updated${data.followUpDate ? ' with reminder' : ''}`
+                : `Lead ${mode === "create" ? "created" : "updated"} successfully${data.followUpDate ? ' with reminder' : ''}`,
           });
         }
       } catch (reminderError) {
@@ -1527,7 +1574,7 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
             data: data,
             updates: updates,
             source: 'lead_form',
-            preventRefresh: false,
+            preventRefresh: true,
             preventCascade: mode === 'edit',
           }
         }));
@@ -1574,9 +1621,16 @@ export default function LeadForm({ open, onOpenChange, lead, mode }: LeadFormPro
       }
     },
     onError: (error: any) => {
+      const message = String(error?.message ?? '');
+      const isDuplicatePhone =
+        message.toLowerCase().includes('phone') &&
+        (message.toLowerCase().includes('already exists') ||
+          message.toLowerCase().includes('duplicate'));
       toast({
         title: "Error",
-        description: error.message || `Failed to ${mode} lead`,
+        description: isDuplicatePhone
+          ? 'A lead with this phone number already exists for your centre. Search for it in the Leads list and edit it instead.'
+          : message || `Failed to ${mode} lead`,
         variant: "destructive",
       });
     }

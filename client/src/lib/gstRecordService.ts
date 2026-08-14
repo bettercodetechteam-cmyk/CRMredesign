@@ -1,3 +1,11 @@
+import type { Firestore } from 'firebase/firestore';
+
+import {
+  createGstRecord,
+  deleteGstRecord,
+  listGstRecords,
+} from '@/lib/crmRecordsStore';
+import { isPostgresPrimary } from '@/lib/nestApi';
 import {
   addDoc,
   collection,
@@ -9,7 +17,6 @@ import {
   Timestamp,
   where,
 } from 'firebase/firestore';
-import type { Firestore } from 'firebase/firestore';
 
 const GST_RATE = 0.18;
 
@@ -131,6 +138,49 @@ export async function createGstRecordIfNotExists(
 
   creationLocks.add(uniqueKey);
   try {
+    if (isPostgresPrimary()) {
+      const existing = await listGstRecords(params.centreId);
+      const duplicate = existing.some(
+        (row) =>
+          row.uniqueKey === uniqueKey ||
+          (Array.isArray(row.invoiceNumbers) &&
+            row.invoiceNumbers.includes(receiptNumber)),
+      );
+      if (duplicate) {
+        return { created: false, skippedReason: 'duplicate' };
+      }
+
+      const gstDate = resolveGstDate(params.feesPaidDate);
+      const dateStr = `${gstDate.getFullYear()}-${String(gstDate.getMonth() + 1).padStart(2, '0')}-${String(gstDate.getDate()).padStart(2, '0')}`;
+      const { basicAmount, gst, total } = calculateGstFromTotal(params.totalAmount);
+
+      const gstRecord: Omit<GstRecordPayload, 'id'> = {
+        date: dateStr,
+        partyName: params.partyName,
+        totalInvoice: total,
+        basicAmount,
+        gst,
+        invoiceNumbers: [receiptNumber],
+        hsn: '9983',
+        b2bB2c: 'B2C',
+        companyName: params.companyName,
+        month: gstDate.toLocaleString('default', { month: 'long' }).toUpperCase(),
+        year: gstDate.getFullYear(),
+        studentId,
+        installmentType: params.installmentType,
+        uniqueKey,
+        centreId: params.centreId,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      };
+
+      const created = await createGstRecord(gstRecord as unknown as Record<string, unknown>);
+      return {
+        created: true,
+        record: { ...(gstRecord as GstRecordPayload), id: String(created.id) },
+      };
+    }
+
     const uniqueKeyQuery = query(
       collection(db, 'gstRecords'),
       where('uniqueKey', '==', uniqueKey),
@@ -202,6 +252,24 @@ export async function deleteGstRecordByReceipt(
   const trimmedReceipt = receiptNumber?.trim();
   if (!trimmedStudentId || !trimmedReceipt || !isValidReceiptOrInvoiceNumber(trimmedReceipt)) {
     return { deletedIds: [] };
+  }
+
+  if (isPostgresPrimary()) {
+    const existing = await listGstRecords();
+    const uniqueKey = buildGstUniqueKey(trimmedStudentId, trimmedReceipt);
+    const matches = existing.filter(
+      (row) =>
+        row.uniqueKey === uniqueKey ||
+        (Array.isArray(row.invoiceNumbers) && row.invoiceNumbers.includes(trimmedReceipt)),
+    );
+    const deletedIds: string[] = [];
+    for (const row of matches) {
+      if (row.id) {
+        await deleteGstRecord(String(row.id));
+        deletedIds.push(String(row.id));
+      }
+    }
+    return { deletedIds };
   }
 
   const deletedIds: string[] = [];

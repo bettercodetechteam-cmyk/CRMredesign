@@ -3,9 +3,12 @@ import { z } from "zod";
 // Phone number validation schema that can be reused
 export const phoneNumberSchema = z.string()
   .min(1, "Phone number is required")
-  .transform((val) => val.toString()) // Ensure it's always a string
+  .transform((val) => val.toString())
   .refine((val) => /^[0-9+\-\s()]+$/.test(val), "Invalid phone number format")
-  .refine((val) => val.replace(/[^0-9]/g, '').length >= 10, "Phone number must be at least 10 digits");
+  .refine((val) => {
+    const ten = val.replace(/\D/g, '').slice(-10);
+    return /^[6-9][0-9]{9}$/.test(ten);
+  }, "Enter a valid 10-digit Indian mobile number (starting with 6–9)");
 
 // Email validation schema
 export const emailSchema = z.string()
