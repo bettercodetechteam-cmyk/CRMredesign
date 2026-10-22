@@ -540,11 +540,12 @@ export default function EnhancedFeeManagement() {
   const actualFees = parseFloat(feeForm.watch("actualFees")?.toString() || "0");
   const discountedFees = parseFloat(feeForm.watch("discountedFees")?.toString() || "0");
   const feesPaid = parseFloat(feeForm.watch("feesPaid")?.toString() || "0");
-  const feesBalance = (discountedFees || actualFees) - feesPaid;
+  const payableFees = Math.round(((discountedFees > 0 ? discountedFees : actualFees) + Number.EPSILON) * 100) / 100;
+  const feesBalance = Math.round((Math.max(0, payableFees - feesPaid) + Number.EPSILON) * 100) / 100;
 
   useEffect(() => {
     if (actualFees > 0 || discountedFees > 0 || feesPaid > 0) {
-      feeForm.setValue("feesBalance", parseFloat(feesBalance.toFixed(2)));
+      feeForm.setValue("feesBalance", feesBalance);
     }
   }, [actualFees, discountedFees, feesPaid, feesBalance, feeForm]);
 

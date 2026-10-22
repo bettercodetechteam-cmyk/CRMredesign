@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { usePermissions } from '@/hooks/usePermissions';
-import { firebaseListenerManager } from '@/lib/firebaseListenerManager';
+import { db } from '@/lib/firebase';
 
 export function useApprovalNotifications() {
   const [pendingCount, setPendingCount] = useState(0);
@@ -16,17 +17,23 @@ export function useApprovalNotifications() {
 
     setLoading(true);
 
-    const unsubscribe = firebaseListenerManager.subscribe(
-      'users',
-      (usersData) => {
-        const pendingUsers = usersData.filter(
-          (user: { approved?: boolean; rejected?: boolean }) =>
-            user.approved === false && !user.rejected
-        );
+    if (!db) {
+      setPendingCount(0);
+      setLoading(false);
+      return;
+    }
+
+    const pendingQuery = query(collection(db, 'users'), where('approved', '==', false));
+    const unsubscribe = onSnapshot(
+      pendingQuery,
+      (snapshot) => {
+        const pendingUsers = snapshot.docs.filter((userDoc) => userDoc.data().rejected !== true);
         setPendingCount(pendingUsers.length);
         setLoading(false);
       },
-      {}
+      () => {
+        setLoading(false);
+      }
     );
 
     return () => unsubscribe();

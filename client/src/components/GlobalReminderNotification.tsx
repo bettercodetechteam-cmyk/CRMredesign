@@ -38,6 +38,7 @@ export default function GlobalReminderNotification() {
 
   useEffect(() => {
     if (!userProfile?.centreId || !userProfile?.uid) return;
+    if (userProfile.role === 'student' || userProfile.role === 'parent') return;
 
     if (process.env.NODE_ENV === 'development') {
     }

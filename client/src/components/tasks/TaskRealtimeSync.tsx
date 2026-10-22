@@ -84,9 +84,10 @@ export function TaskRealtimeSync() {
 
   const userId = userProfile?.id || userProfile?.uid;
   const centreId = userProfile?.centreId || 'default';
+  const learner = userProfile?.role === 'student' || userProfile?.role === 'parent';
 
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || learner) return;
 
     notificationService.init(centreId, userId);
 
@@ -174,7 +175,7 @@ export function TaskRealtimeSync() {
       unsubscribeTasks();
       unsubscribeNotifications();
     };
-  }, [userId, centreId, isDirector, queryClient, toast]);
+  }, [userId, centreId, isDirector, learner, queryClient, toast]);
 
   return null;
 }

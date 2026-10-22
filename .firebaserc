@@ -1,7 +1,11 @@
 {
   "projects": {
-    "default": "crmredesign",
+    "default": "syllabus-traker-1",
+    "syllabus": "syllabus-traker-1",
+    "crmredesign": "crmredesign",
     "production": "zica-zima-crm",
     "testing": "crmredesign"
-  }
+  },
+  "targets": {},
+  "etags": {}
 }

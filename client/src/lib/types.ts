@@ -13,6 +13,8 @@ export type UserRole =
   | 'employee'
   | 'admin'
   | 'accountant'
+  | 'student'
+  | 'parent'
   | 'pending';
 
 export interface DashboardStats {
@@ -65,6 +67,8 @@ export const ROLE_NAMES: Record<UserRole, string> = {
   employee: 'Employee',
   admin: 'Administrator',
   accountant: 'Accountant',
+  student: 'Student',
+  parent: 'Parent',
   pending: 'Pending Approval',
 };
 

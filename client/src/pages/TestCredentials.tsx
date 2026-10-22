@@ -4,19 +4,86 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Copy, CheckCircle, AlertCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { openCredentialLoginWindow } from '@/lib/firebase';
 
-const testUsers = [
+interface TestUser {
+  email: string;
+  password: string;
+  role: string;
+  description: string;
+}
+
+const staffUsers: TestUser[] = [
   {
     email: 'gauravkarewar724@gmail.com',
     password: 'Gaurav31@',
     role: 'director',
     description: 'Full system access - can view all features'
-  }
+  },
+  {
+    email: 'academic.head@example.com',
+    password: 'AcademicHead#2026',
+    role: 'academic_head',
+    description: 'Creates and publishes syllabi, and opens the coordinator report'
+  },
+  {
+    email: 'centre.head@example.com',
+    password: 'CentreHead#2026',
+    role: 'centre_head',
+    description: 'Pins a syllabus to a batch and schedules topics'
+  },
+  {
+    email: 'faculty@example.com',
+    password: 'Faculty#2026',
+    role: 'faculty',
+    description: 'Faculty Teacher · Updates lessons for assigned batches'
+  },
+  {
+    email: 'faculty2@example.com',
+    password: 'Faculty#2026',
+    role: 'faculty',
+    description: 'Ananya Deshmukh · Second teacher login'
+  },
+];
+
+const studentParentPairs: { student: TestUser; parent: TestUser }[] = [
+  {
+    student: { email: 'student@example.com', password: 'Student#2026', role: 'student', description: 'Aarav Mehta · Game Art Design' },
+    parent: { email: 'parent@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Aarav Mehta' },
+  },
+  {
+    student: { email: 'student2@example.com', password: 'Student#2026', role: 'student', description: 'Diya Shah · Digital Marketing' },
+    parent: { email: 'parent2@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Diya Shah' },
+  },
+  {
+    student: { email: 'student3@example.com', password: 'Student#2026', role: 'student', description: 'Kabir Joshi · Game Art Design' },
+    parent: { email: 'parent3@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Kabir Joshi' },
+  },
+  {
+    student: { email: 'sanyamgandhi0131@gmail.com', password: 'Student#2026', role: 'student', description: 'Myra Patel · Digital Marketing' },
+    parent: { email: 'parent4@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Myra Patel' },
+  },
+  {
+    student: { email: 'student5@example.com', password: 'Student#2026', role: 'student', description: 'Vivaan Rao · Game Art Design' },
+    parent: { email: 'parent5@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Vivaan Rao' },
+  },
 ];
 
 export default function TestCredentials() {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const { toast } = useToast();
+
+  const openLoginWindow = (email: string, password: string) => {
+    try {
+      openCredentialLoginWindow(email, password);
+    } catch (error) {
+      toast({
+        title: 'Tab blocked',
+        description: error instanceof Error ? error.message : 'Allow pop-ups for this site, then try again.',
+        variant: 'destructive',
+      });
+    }
+  };
 
   const copyToClipboard = async (text: string, field: string) => {
     try {
@@ -39,8 +106,10 @@ export default function TestCredentials() {
   const getRoleColor = (role: string) => {
     const colors: { [key: string]: string } = {
       director: 'bg-purple-100 text-purple-800',
+      academic_head: 'bg-indigo-100 text-indigo-800',
       centre_head: 'bg-blue-100 text-blue-800',
       faculty: 'bg-green-100 text-green-800',
+      parent: 'bg-amber-100 text-amber-800',
       bdm: 'bg-orange-100 text-orange-800',
       accounts: 'bg-teal-100 text-teal-800',
       marketing: 'bg-pink-100 text-pink-800',
@@ -49,9 +118,71 @@ export default function TestCredentials() {
     return colors[role] || 'bg-gray-100 text-gray-800';
   };
 
+  const credentialCard = (user: TestUser) => (
+    <Card key={user.email} className="hover:shadow-lg transition-shadow h-full">
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-lg capitalize">{user.role.replace('_', ' ')}</CardTitle>
+          <Badge className={getRoleColor(user.role)}>
+            {user.role}
+          </Badge>
+        </div>
+        <CardDescription>{user.description}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <label className="text-sm font-medium text-gray-700 mb-1 block">Email</label>
+          <div className="flex items-center space-x-2">
+            <code className="flex-1 min-w-0 break-all bg-gray-100 px-3 py-2 rounded text-sm font-mono">
+              {user.email}
+            </code>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => copyToClipboard(user.email, `${user.email}-email`)}
+              className="flex-shrink-0"
+            >
+              {copiedField === `${user.email}-email` ? (
+                <CheckCircle className="w-4 h-4 text-green-600" />
+              ) : (
+                <Copy className="w-4 h-4" />
+              )}
+            </Button>
+          </div>
+        </div>
+        <div>
+          <label className="text-sm font-medium text-gray-700 mb-1 block">Password</label>
+          <div className="flex items-center space-x-2">
+            <code className="flex-1 min-w-0 break-all bg-gray-100 px-3 py-2 rounded text-sm font-mono">
+              {user.password}
+            </code>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => copyToClipboard(user.password, `${user.email}-password`)}
+              className="flex-shrink-0"
+            >
+              {copiedField === `${user.email}-password` ? (
+                <CheckCircle className="w-4 h-4 text-green-600" />
+              ) : (
+                <Copy className="w-4 h-4" />
+              )}
+            </Button>
+          </div>
+        </div>
+        <Button
+          className="w-full"
+          onClick={() => openLoginWindow(user.email, user.password)}
+        >
+          Open login tab
+        </Button>
+      </CardContent>
+    </Card>
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-4">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Test Credentials</h1>
@@ -66,83 +197,24 @@ export default function TestCredentials() {
               <div>
                 <h3 className="font-semibold text-yellow-800">Important Notice</h3>
                 <p className="text-yellow-700 text-sm mt-1">
-                  These are test credentials for development purposes only. 
-                  Do not use these in production. All users have the password format: <code>role123</code>
+                  These are test credentials for the Syllabus Tracker project only.
+                  Do not use these in production.
                 </p>
               </div>
             </div>
           </CardContent>
         </Card>
 
-        {/* Test Users Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {testUsers.map((user) => (
-            <Card key={user.email} className="hover:shadow-lg transition-shadow">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg capitalize">{user.role.replace('_', ' ')}</CardTitle>
-                  <Badge className={getRoleColor(user.role)}>
-                    {user.role}
-                  </Badge>
-                </div>
-                <CardDescription>{user.description}</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {/* Email */}
-                <div>
-                  <label className="text-sm font-medium text-gray-700 mb-1 block">Email</label>
-                  <div className="flex items-center space-x-2">
-                    <code className="flex-1 bg-gray-100 px-3 py-2 rounded text-sm font-mono">
-                      {user.email}
-                    </code>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => copyToClipboard(user.email, 'Email')}
-                      className="flex-shrink-0"
-                    >
-                      {copiedField === 'Email' ? (
-                        <CheckCircle className="w-4 h-4 text-green-600" />
-                      ) : (
-                        <Copy className="w-4 h-4" />
-                      )}
-                    </Button>
-                  </div>
-                </div>
+          {staffUsers.map((user) => credentialCard(user))}
+        </div>
 
-                {/* Password */}
-                <div>
-                  <label className="text-sm font-medium text-gray-700 mb-1 block">Password</label>
-                  <div className="flex items-center space-x-2">
-                    <code className="flex-1 bg-gray-100 px-3 py-2 rounded text-sm font-mono">
-                      {user.password}
-                    </code>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => copyToClipboard(user.password, 'Password')}
-                      className="flex-shrink-0"
-                    >
-                      {copiedField === 'Password' ? (
-                        <CheckCircle className="w-4 h-4 text-green-600" />
-                      ) : (
-                        <Copy className="w-4 h-4" />
-                      )}
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Quick Login Button */}
-                <Button
-                  className="w-full"
-                  onClick={() => {
-                    copyToClipboard(`${user.email}\n${user.password}`, 'Credentials');
-                  }}
-                >
-                  Copy Credentials
-                </Button>
-              </CardContent>
-            </Card>
+        <div className="mt-8 space-y-4">
+          {studentParentPairs.map((pair) => (
+            <div key={pair.student.email} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {credentialCard(pair.student)}
+              {credentialCard(pair.parent)}
+            </div>
           ))}
         </div>
 
@@ -158,8 +230,9 @@ export default function TestCredentials() {
                 <ol className="list-decimal list-inside space-y-1 text-sm text-gray-600">
                   <li>Go to the login page</li>
                   <li>Use any of the test credentials above</li>
-                  <li>Click "Sign In"</li>
-                  <li>You'll be redirected to the dashboard</li>
+                  <li>Click "Open login tab" on a role</li>
+                  <li>That role's login page opens in a new tab</li>
+                  <li>Click "Sign In" in that window</li>
                 </ol>
               </div>
 

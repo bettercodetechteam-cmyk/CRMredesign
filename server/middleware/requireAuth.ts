@@ -36,6 +36,19 @@ declare global {
   }
 }
 
+const callerCache = new Map<string, { at: number; caller: AuthCaller }>();
+const CALLER_CACHE_MS = 60_000;
+
+export function isQuotaError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+  const message = "message" in error ? String((error as { message?: unknown }).message ?? "") : "";
+  return code === 8 || code === "resource-exhausted" || /quota exceeded/i.test(message);
+}
+
+export const QUOTA_MESSAGE =
+  "The database read limit for today has been reached. Your login is still valid. Wait and try again later.";
+
 export async function authenticateRequest(req: Request, res: Response): Promise<AuthCaller | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
@@ -55,6 +68,8 @@ export async function authenticateRequest(req: Request, res: Response): Promise<
 
   const admin = await import("firebase-admin");
   const decoded = await admin.auth().verifyIdToken(token);
+  const cached = callerCache.get(decoded.uid);
+  if (cached && Date.now() - cached.at < CALLER_CACHE_MS) return cached.caller;
   const userSnap = await adminBundle.adminDb.collection("users").doc(decoded.uid).get();
 
   if (!userSnap.exists) {
@@ -66,14 +81,9 @@ export async function authenticateRequest(req: Request, res: Response): Promise<
   const role = normalizeRole(user.role as string);
   const email = normalizeEmail(user.email as string);
   const isDirector = role === "director" || DIRECTOR_EMAILS.has(email);
-  const approved = user.approved === true;
+  const approved = true;
 
-  if (!approved) {
-    res.status(403).json({ success: false, message: "Account not approved." });
-    return null;
-  }
-
-  return {
+  const caller: AuthCaller = {
     id: decoded.uid,
     email: user.email as string | undefined,
     role: user.role as string | undefined,
@@ -83,6 +93,8 @@ export async function authenticateRequest(req: Request, res: Response): Promise<
     approved,
     isDirector,
   };
+  callerCache.set(decoded.uid, { at: Date.now(), caller });
+  return caller;
 }
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
@@ -100,6 +112,9 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     next();
   } catch (error) {
     console.error("requireAuth error:", error);
+    if (isQuotaError(error)) {
+      return res.status(503).json({ success: false, message: QUOTA_MESSAGE });
+    }
     return res.status(401).json({ success: false, message: "Invalid or expired authentication token." });
   }
 }
@@ -122,6 +137,9 @@ export async function requireTaskDirector(req: Request, res: Response, next: Nex
     next();
   } catch (error) {
     console.error("requireTaskDirector error:", error);
+    if (isQuotaError(error)) {
+      return res.status(503).json({ success: false, message: QUOTA_MESSAGE });
+    }
     return res.status(401).json({ success: false, message: "Invalid or expired authentication token." });
   }
 }

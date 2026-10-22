@@ -188,7 +188,7 @@ export default function Auth() {
 
       toast({
         title: 'Account created successfully!',
-        description: 'Your account is pending approval. You will be notified once approved.',
+        description: 'Your account is ready. Sign in with the email and password you just created.',
       });
 
       // Reset form
@@ -280,7 +280,7 @@ export default function Auth() {
           <Alert className="border-orange-200 bg-orange-50 mb-4">
             <Clock className="h-4 w-4 text-orange-600" />
             <AlertDescription className="text-orange-700">
-              Your account is pending approval. You will be notified once approved.
+              Your account is ready. Sign in with the email and password you just created.
             </AlertDescription>
           </Alert>
         );

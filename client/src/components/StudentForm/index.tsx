@@ -24,6 +24,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { firebaseHelpers } from "@/lib/firebaseHelpers";
+import { syllabusApi, errorMessage } from "@/lib/syllabusApi";
 import { firebaseCache } from "@/lib/firebaseCache";
 import { commonSchemas } from "@/lib/validationUtils";
 import { Loader2, UserPlus, GraduationCap, DollarSign, Calendar, CreditCard, Search, Plus, X } from "lucide-react";
@@ -33,10 +34,6 @@ import { getNextSerialNumberFromItems } from "@/lib/serialNumberUtils";
 import { db } from "@/lib/firebase";
 import { MAX_INSTALLMENTS } from "@/constants/feeInstallments";
 import { applyInstallmentDueDatesToFeePayload } from "@/utils/feeInstallmentSchedule";
-import { 
-  ALL_STANDARDIZED_COURSES, 
-  MODULAR_PROGRAMS 
-} from "@/lib/leadDataCleaningService";
 import { 
   getAllSources, 
   addCustomSource, 
@@ -142,41 +139,24 @@ type StudentFormData = {
   zicaSubCategory?: string;
 };
 
-// ZICA/ZIMA Courses - All standardized courses
-const zicaZimaCourses = Array.from(new Set([...ALL_STANDARDIZED_COURSES, ...MODULAR_PROGRAMS]));
-
-// Bettercode Courses
-const bettercodeCourses = [
-  "AI/ML",
-  "Javascript",
-  "Full Stack",
-  "Gen AI",
-  "PowerBI",
-  "SQL",
-  "MYSQL",
-  "C",
-  "C++",
-  "HTML",
-  "CSS",
-  "Data Analytics",
-  "Java",
-  "Flutter",
-  "ETL/Informatica",
-  "Python",
-  "School Python",
-  "Web Development",
-  "School AI",
-  "School Java",
-  "Testing/Automation",
-  "Adv. Excel",
-  "Tableau",
-  "ReactJS"
-];
-
 const paymentModes = ["Cash", "UPI", "Bank Transfer", "Cheque", "Card"];
 const zicaZimaOptions = ["ZICA", "AIGT"];
 const feesStructureOptions = ["Full Payment", "Installment"];
 const courseDurationOptions = ["1", "1.5", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "27", "36", "Other"];
+
+function roundRupees(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function feeAmounts(actualRaw: number, discountRaw: number, paidRaw: number) {
+  const actual = roundRupees(Math.max(0, actualRaw));
+  const discount = roundRupees(Math.min(Math.max(0, discountRaw), actual));
+  const payable = roundRupees(Math.max(0, actual - discount));
+  const paid = roundRupees(Math.max(0, paidRaw));
+  const balance = roundRupees(Math.max(0, payable - paid));
+  return { actual, discount, payable, paid, balance };
+}
 
 function getEditDefaultValues(s: any, centreId?: string): Partial<StudentFormData> {
   const emailVal = s?.email ?? s?.emailId ?? "";
@@ -240,6 +220,7 @@ export default function StudentForm({
   const queryClient = useQueryClient();
   const { userProfile } = useAuth();
   const [courses, setCourses] = useState<string[]>([]);
+  const [coursesReady, setCoursesReady] = useState(false);
   const [customCourses, setCustomCourses] = useState<string[]>([]);
   const [showCustomCourseInput, setShowCustomCourseInput] = useState(false);
   const [customCourseInput, setCustomCourseInput] = useState("");
@@ -290,45 +271,28 @@ export default function StudentForm({
     return unsubscribe;
   }, [userProfile?.centreId]);
 
-  // Load custom courses from Firestore
   useEffect(() => {
-    const loadCustomCourses = async () => {
-      try {
-        const customCoursesQuery = query(collection(db, 'customCourses'), orderBy('createdAt', 'desc'));
-        const snapshot = await getDocs(customCoursesQuery);
-        const loadedCourses = snapshot.docs.map(doc => doc.data().courseName);
-        setCustomCourses(loadedCourses);
-      } catch (error) {
-        console.error('Error loading custom courses:', error);
-      }
+    if (!open) return;
+    let cancelled = false;
+    setCoursesReady(false);
+    syllabusApi.courseNames()
+      .then((names) => {
+        if (cancelled) return;
+        const current = (form.getValues("course") || student?.course || "").trim();
+        const next = [...names];
+        if (current && !next.some((name) => name.toLowerCase() === current.toLowerCase())) next.push(current);
+        setCourses(next);
+      })
+      .catch(() => {
+        if (!cancelled) setCourses([]);
+      })
+      .finally(() => {
+        if (!cancelled) setCoursesReady(true);
+      });
+    return () => {
+      cancelled = true;
     };
-    loadCustomCourses();
-  }, []);
-
-  // Update courses based on selected program
-  useEffect(() => {
-    const subscription = form.watch((value, { name }) => {
-      if (name === 'zicaZima' || !name) {
-        const program = value.zicaZima || selectedProgram;
-        let baseCourses: string[] = [];
-        
-        if (program === 'ZICA' || program === 'ZICA/ZIMA' || program === 'ZIMA') {
-          baseCourses = [...zicaZimaCourses];
-        } else if (program === 'AIGT' || program === 'Bettercode') {
-          baseCourses = [...bettercodeCourses];
-        } else {
-          // Default to all courses if no program selected
-          baseCourses = [...zicaZimaCourses, ...bettercodeCourses];
-        }
-        
-        // Add custom courses and "Other" option
-        const allCourses = [...baseCourses, ...customCourses, "Other"];
-        setCourses(Array.from(new Set(allCourses)));
-      }
-    });
-    
-    return () => subscription.unsubscribe();
-  }, [selectedProgram, customCourses, form]);
+  }, [open, form, student?.course]);
 
   // Reset form when dialog opens/closes or mode changes
   useEffect(() => {
@@ -448,11 +412,12 @@ export default function StudentForm({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- lastUsedSource intentionally omitted: reset only on open, not when user selects source
   }, [open, student, mode, nextSrNo, userProfile?.centreId, form]);
 
-  // Calculate fees balance when fees change
+  // Discounted Fees is the concession taken off Actual Fees. Balance is what remains after payments.
   const actualFees = parseFloat(form.watch("actualFees") || "0");
   const discountedFees = parseFloat(form.watch("discountedFees") || "0");
   const feesPaid = parseFloat(form.watch("feesPaid") || "0");
-  const feesBalance = (discountedFees || actualFees) - feesPaid;
+  const feeCalc = feeAmounts(actualFees, discountedFees, feesPaid);
+  const feesBalance = feeCalc.balance;
 
   useEffect(() => {
     if (actualFees > 0 || discountedFees > 0 || feesPaid > 0) {
@@ -579,7 +544,8 @@ export default function StudentForm({
       const noOfInstallments = studentData.noOfInstallments || 0;
       const installmentsPaid = studentData.installmentsPaid || 0;
       const remainingInstallmentsCount = Math.max(0, noOfInstallments - installmentsPaid);
-      const remainingFees = Math.max(0, (studentData.discountedFees || studentData.actualFees || 0) - (studentData.feesPaid || 0));
+      const feeCalc = feeAmounts(studentData.actualFees || 0, studentData.discountedFees || 0, studentData.feesPaid || 0);
+      const remainingFees = feeCalc.balance;
       
       // Calculate installment amounts if needed
       let installmentAmount = 0;
@@ -605,7 +571,7 @@ export default function StudentForm({
           ? (studentData.courseStartDate instanceof Date ? Timestamp.fromDate(studentData.courseStartDate) : studentData.courseStartDate)
           : Timestamp.now(),
         actualFees: studentData.actualFees || 0,
-        discountedFees: studentData.discountedFees || studentData.actualFees || 0,
+        discountedFees: feeCalc.payable,
         feesPaid: studentData.feesPaid || 0,
         feesPaidDate: studentData.feesPaidDate 
           ? (studentData.feesPaidDate instanceof Date ? Timestamp.fromDate(studentData.feesPaidDate) : studentData.feesPaidDate)
@@ -673,13 +639,14 @@ export default function StudentForm({
 
 
       const actualFees = studentData.actualFees || 0;
-      const discountedFees = studentData.discountedFees || actualFees;
-      const feesPaid = studentData.feesPaid || 0;
+      const createdFees = feeAmounts(actualFees, studentData.discountedFees || 0, studentData.feesPaid || 0);
+      const discountedFees = createdFees.payable;
+      const feesPaid = createdFees.paid;
       const noOfInstallments = studentData.noOfInstallments || 0;
       const installmentsPaid = studentData.installmentsPaid || 0;
       const remainingInstallmentsCount = Math.max(0, noOfInstallments - installmentsPaid);
       
-      const remainingFees = Math.max(0, discountedFees - feesPaid);
+      const remainingFees = createdFees.balance;
       
       // Calculate float installment amount with 2 decimal precision
       let installmentAmount = 0;
@@ -739,7 +706,7 @@ export default function StudentForm({
         discountedFees: discountedFees,
         feesPaid: feesPaid,
         feesPaidDate: studentData.feesPaidDate ? studentData.feesPaidDate : null,
-        feesBalance: discountedFees - feesPaid,
+        feesBalance: remainingFees,
         registrationAmount: 0,
         paymentMode: (studentData.paymentMode || 'Cash') as 'Cash' | 'Card' | 'UPI' | 'Bank Transfer' | 'Cheque',
         chequeNumber: studentData.chequeNumber || '',
@@ -833,9 +800,26 @@ export default function StudentForm({
         }
       }
       
-      return studentId;
+      let enrollMessage = mode === "create" ? "Student added successfully!" : "Student updated successfully!";
+      if (studentId && mode === "create") {
+        try {
+          const enrolled = await syllabusApi.enrollStudent({
+            studentId,
+            email: data.email?.trim() || "",
+            phone: data.phone.trim(),
+            parentPhone: data.parentsContactNumber?.trim() || "",
+            course: data.course.trim(),
+          });
+          enrollMessage = enrolled.message;
+        } catch (error) {
+          const detail = errorMessage(error);
+          enrollMessage = detail ? `${enrollMessage} ${detail}` : enrollMessage;
+        }
+      }
+
+      return { studentId, enrollMessage };
     },
-    onSuccess: async (_data, variables) => {
+    onSuccess: async (result, variables) => {
       const submittedSource = variables?.source?.trim();
       if (submittedSource) setLastUsedSource(submittedSource);
       firebaseCache.invalidatePattern("students");
@@ -844,7 +828,7 @@ export default function StudentForm({
       queryClient.invalidateQueries({ queryKey: ["fees"] });
       toast({
         title: "Success",
-        description: mode === "create" ? "Student added successfully!" : "Student updated successfully!",
+        description: result.enrollMessage,
       });
       onOpenChange(false);
       form.reset();
@@ -954,6 +938,7 @@ export default function StudentForm({
                 {form.formState.errors.phone && (
                   <p className="text-sm text-red-500">{form.formState.errors.phone.message}</p>
                 )}
+                <p className="text-xs text-slate-500">On a new student, this number opens My class. The password is shown after save.</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="parentsContactNumber">Parents Contact</Label>
@@ -969,6 +954,7 @@ export default function StudentForm({
                     />
                   )}
                 />
+                <p className="text-xs text-slate-500">On a new student, this number opens the parent progress page.</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="source">Source</Label>
@@ -1153,7 +1139,7 @@ export default function StudentForm({
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2" data-field="course">
                 <Label htmlFor="course">
-                  Course <span className="text-red-500">*</span>
+                  Course enrolled <span className="text-red-500">*</span>
                 </Label>
                 
                 {!showCustomCourseInput ? (
@@ -1170,7 +1156,7 @@ export default function StudentForm({
                     }}
                   >
                     <SelectTrigger id="course-select" className="w-full">
-                      <SelectValue placeholder="Select course" />
+                      <SelectValue placeholder="Select the course this student is taking" />
                     </SelectTrigger>
                     <SelectContent className="z-[99999] max-h-[300px]">
                       {/* Search Input */}
@@ -1209,11 +1195,11 @@ export default function StudentForm({
                           </SelectItem>
                         ))}
                       
-                      {courses.filter(course => 
+                      {coursesReady && courses.filter(course => 
                         course.toLowerCase().includes(courseSearchTerm.toLowerCase())
                       ).length === 0 && (
                         <div className="p-4 text-center text-gray-500 text-sm">
-                          No courses found
+                          No courses yet. Create one on the Syllabus page first.
                         </div>
                       )}
                     </SelectContent>
@@ -1466,11 +1452,17 @@ export default function StudentForm({
             </div>
             <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
               <p className="text-sm text-blue-800">
-                {remainingInstallments > 0 && (
-                  <span className="block mt-1">
-                    Installment amount: ₹{Math.round(feesBalance / remainingInstallments)} per installment
-                  </span>
-                )}
+                {feesBalance <= 0
+                  ? "Fees are fully paid."
+                  : remainingInstallments > 0
+                    ? (() => {
+                        const each = roundRupees(feesBalance / remainingInstallments);
+                        const last = roundRupees(feesBalance - roundRupees(each * (remainingInstallments - 1)));
+                        return each === last
+                          ? `Installment amount: ₹${each.toFixed(2)} per installment`
+                          : `Installment amount: ₹${each.toFixed(2)} per installment, last installment ₹${last.toFixed(2)}`;
+                      })()
+                    : `Balance ₹${feesBalance.toFixed(2)} is still due. Add the number of installments to split it.`}
               </p>
             </div>
           </div>

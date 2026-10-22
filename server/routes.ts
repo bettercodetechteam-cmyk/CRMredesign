@@ -9,6 +9,7 @@ import AuthService from "./services/authService";
 import { IamService } from "./services/iamService";
 import { requireDirector } from "./middleware/requireDirector";
 import { requireAuth, requireTaskDirector } from "./middleware/requireAuth";
+import { registerSyllabusRoutes } from "./syllabusRoutes";
 import { TaskService } from "./services/taskService";
 import { getFirebaseAdmin } from "./firebaseConfig";
 import { imageKitService } from "./services/imageKitService";
@@ -27,6 +28,7 @@ export const roleContext = {
 };
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  registerSyllabusRoutes(app);
   const toDate = (value: any): Date | null => {
     if (!value) return null;
     if (value instanceof Date) return value;

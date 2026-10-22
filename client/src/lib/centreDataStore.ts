@@ -341,6 +341,15 @@ class CentreDataStore {
     this.nestMode = isNestLeadsEnabled();
     this.notify();
 
+    if (!db) {
+      this.leads = [];
+      this.loading = false;
+      this.hasSnapshot = true;
+      this.isLive = false;
+      this.notify();
+      return;
+    }
+
     if (this.nestMode) {
       void this.refreshFromNest();
       this.nestPollTimer = setInterval(() => {

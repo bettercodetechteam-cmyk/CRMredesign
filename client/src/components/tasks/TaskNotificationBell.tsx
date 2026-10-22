@@ -111,7 +111,7 @@ export function TaskNotificationBell() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   useEffect(() => {
-    if (!userProfile?.uid) return;
+    if (!userProfile?.uid || userProfile.role === 'student' || userProfile.role === 'parent') return;
 
     notificationService.init(userProfile.centreId || 'default', userProfile.uid);
     const unsubscribe = notificationService.subscribe((items) => {
@@ -119,7 +119,7 @@ export function TaskNotificationBell() {
     });
 
     return unsubscribe;
-  }, [userProfile?.uid, userProfile?.centreId]);
+  }, [userProfile?.uid, userProfile?.centreId, userProfile?.role]);
 
   const taskNotifications = useMemo(
     () =>
