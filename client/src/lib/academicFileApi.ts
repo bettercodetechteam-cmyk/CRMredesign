@@ -47,6 +47,59 @@ export function parseListFilesResponse(data: unknown): Array<{ filePath?: string
   return [];
 }
 
+export interface UploadedAcademicFile {
+  name: string;
+  url: string;
+  path?: string;
+  filePath?: string;
+  fileId?: string;
+  size?: number;
+  courseName?: string;
+  courseWarning?: string;
+}
+
+let storageMode: Promise<"local" | "imagekit"> | null = null;
+
+export function curriculumStorageMode(): Promise<"local" | "imagekit"> {
+  if (!storageMode) {
+    storageMode = fetch(getAcademicApiUrl("curriculum/mode"))
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Curriculum storage is unavailable.");
+        const data = (await res.json()) as { mode?: string };
+        return data.mode === "local" ? "local" : "imagekit";
+      })
+      .catch((error) => {
+        storageMode = null;
+        throw error;
+      });
+  }
+  return storageMode;
+}
+
+/** Uploads one curriculum file. Uses local storage when ImageKit is not configured. */
+export async function uploadAcademicFile(
+  file: Blob,
+  fileName: string,
+  folder: string,
+  imageKitUpload: () => Promise<UploadedAcademicFile>,
+): Promise<UploadedAcademicFile> {
+  if ((await curriculumStorageMode()) !== "local") return imageKitUpload();
+  const { auth } = await import("@/lib/firebase");
+  const token = await auth?.currentUser?.getIdToken().catch(() => "");
+  const params = new URLSearchParams({ folder: folder.replace(/^\/+/, ""), name: fileName });
+  const res = await fetch(getAcademicApiUrl(`curriculum/upload?${params.toString()}`), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error || "Upload failed");
+  return data as UploadedAcademicFile;
+}
+
 /** Fetch with one retry on failure (helps with transient network issues). */
 export async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 1): Promise<Response> {
   let lastError: Error | null = null;

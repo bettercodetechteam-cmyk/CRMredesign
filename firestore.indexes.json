@@ -125,6 +125,38 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "syllabi",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "centreId", "order": "ASCENDING" },
+        { "fieldPath": "courseName", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "syllabusVersions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "syllabusId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "topicFeedback",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "batchId", "order": "ASCENDING" },
+        { "fieldPath": "topicId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "batchPlans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "centreId", "order": "ASCENDING" },
+        { "fieldPath": "facultyUid", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -23,7 +23,6 @@ import {
 } from 'lucide-react';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useToast } from '@/hooks/use-toast';
-import { useApprovalNotifications } from '@/hooks/useApprovalNotifications';
 import { InlineLoading } from '@/components/ui/loading';
 import { ASSIGNABLE_ROLES } from '@shared/permissions';
 import { approveUser, rejectUser } from '@/lib/iamService';
@@ -43,20 +42,23 @@ interface PendingUser {
 
 export default function ApprovalsPanel() {
   const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState('');
   const [approving, setApproving] = useState<string | null>(null);
   const [selectedRoles, setSelectedRoles] = useState<Record<string, string>>({});
   const { isDirector } = usePermissions();
   const { toast } = useToast();
-  const { pendingCount, loading } = useApprovalNotifications();
 
   useEffect(() => {
-    if (!isDirector) return;
+    if (!isDirector || !db) {
+      setListLoading(false);
+      return;
+    }
 
-    const fetchPendingUsers = async () => {
-      try {
-        const usersRef = collection(db, 'users');
-        const q = query(usersRef, where('approved', '==', false));
-        const snapshot = await getDocs(q);
+    const pendingQuery = query(collection(db, 'users'), where('approved', '==', false));
+    const unsubscribe = onSnapshot(
+      pendingQuery,
+      (snapshot) => {
         const users = snapshot.docs
           .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
           .filter((user: any) => user.approved === false && !user.rejected) as PendingUser[];
@@ -64,21 +66,21 @@ export default function ApprovalsPanel() {
         setSelectedRoles((prev) => {
           const next = { ...prev };
           for (const user of users) {
-            if (!next[user.id]) next[user.id] = 'faculty';
+            if (!next[user.id]) next[user.id] = user.role && user.role !== 'pending' ? user.role : 'faculty';
           }
           return next;
         });
-      } catch (error) {
-        console.error('Error fetching pending users:', error);
-        toast({
-          title: 'Error',
-          description: 'Failed to load pending users.',
-          variant: 'destructive',
-        });
+        setListError('');
+        setListLoading(false);
+      },
+      () => {
+        setListError('Pending approvals could not be loaded.');
+        setListLoading(false);
       }
-    };
-    fetchPendingUsers();
-  }, [toast, isDirector, pendingCount]);
+    );
+
+    return () => unsubscribe();
+  }, [isDirector]);
 
   const handleApprove = async (userId: string) => {
     const role = selectedRoles[userId];
@@ -131,12 +133,14 @@ export default function ApprovalsPanel() {
   return (
     <Card className="border-slate-200 shadow-sm">
       <CardContent className="p-4 sm:p-5">
-        {loading ? (
+        {listLoading ? (
           <div className="flex items-center justify-center gap-2 py-8">
             <InlineLoading size="sm" color="primary" />
             <span className="text-sm text-slate-600">Loading pending approvals...</span>
           </div>
-        ) : pendingCount === 0 ? (
+        ) : listError ? (
+          <p className="py-8 text-center text-sm text-red-600">{listError}</p>
+        ) : pendingUsers.length === 0 ? (
           <div className="text-center py-8">
             <div className="inline-flex items-center justify-center w-12 h-12 bg-green-100 rounded-full mb-3">
               <CheckCircle2 className="h-6 w-6 text-green-600" />

@@ -1,7 +1,7 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp, getApps } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
-import { getAuth, setPersistence, browserSessionPersistence } from "firebase/auth";
+import { getAuth, initializeAuth, setPersistence, browserLocalPersistence, browserSessionPersistence } from "firebase/auth";
 import {
   getFirestore,
   initializeFirestore,
@@ -146,23 +146,88 @@ export async function queryDocsWithServerFallback(q: Query): Promise<QuerySnapsh
     if (!isFirestorePersistenceError(error)) throw error;
     if (typeof window !== "undefined") {
       sessionStorage.setItem("firestore_memory_cache", "1");
-      if (!sessionStorage.getItem("firestore_reload_attempted")) {
-        sessionStorage.setItem("firestore_reload_attempted", "1");
-        window.location.reload();
-        return await new Promise(() => {});
-      }
     }
     console.warn("Firestore cache read failed; retrying from server", error);
     return await getDocsFromServer(q);
   }
 }
 
+const LOGIN_WINDOW_KEY = "login-window-credentials";
+const LOGIN_WINDOW_FLAG = "credential-login-tab";
+const LOGIN_WINDOW_APP = "login-window";
+
+export function isLoginWindow(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    if (sessionStorage.getItem(LOGIN_WINDOW_FLAG) === "1") return true;
+    if (new URLSearchParams(window.location.search).get("loginWindow") === "1") {
+      sessionStorage.setItem(LOGIN_WINDOW_FLAG, "1");
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function rememberLoginWindowCredentials(): void {
+  if (!isLoginWindow()) return;
+  const raw = localStorage.getItem(LOGIN_WINDOW_KEY);
+  if (!raw) return;
+  sessionStorage.setItem(LOGIN_WINDOW_KEY, raw);
+  localStorage.removeItem(LOGIN_WINDOW_KEY);
+}
+
+rememberLoginWindowCredentials();
+
+let loginWindowCredentials: { email: string; password: string } | null | undefined;
+
+/** Read the account chosen on the test-credentials page. Kept for this window only. */
+export function takeLoginWindowCredentials(): { email: string; password: string } | null {
+  if (loginWindowCredentials !== undefined) return loginWindowCredentials;
+  loginWindowCredentials = null;
+  if (!isLoginWindow()) return null;
+  const raw = sessionStorage.getItem(LOGIN_WINDOW_KEY);
+  sessionStorage.removeItem(LOGIN_WINDOW_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { email?: string; password?: string; at?: number };
+    if (!parsed.email || !parsed.password) return null;
+    if (typeof parsed.at === "number" && Date.now() - parsed.at > 60_000) return null;
+    loginWindowCredentials = { email: parsed.email, password: parsed.password };
+  } catch {
+    loginWindowCredentials = null;
+  }
+  return loginWindowCredentials;
+}
+
+export function openCredentialLoginWindow(email: string, password: string): void {
+  const payload = JSON.stringify({ email, password, at: Date.now() });
+  localStorage.setItem(LOGIN_WINDOW_KEY, payload);
+  const opened = window.open(`/login?loginWindow=1&at=${Date.now()}`, "_blank");
+  if (!opened) {
+    localStorage.removeItem(LOGIN_WINDOW_KEY);
+    throw new Error("Allow pop-ups for this site, then open the login tab again.");
+  }
+}
+
+function createAuth(firebaseApp: ReturnType<typeof initializeApp>) {
+  if (isLoginWindow()) {
+    return initializeAuth(firebaseApp, { persistence: browserSessionPersistence });
+  }
+  const au = getAuth(firebaseApp);
+  setPersistence(au, browserLocalPersistence).catch(() => {});
+  return au;
+}
+
 function initServicesWithConfig(config: Record<string, string>) {
-  const a = initializeApp(config);
-  const au = getAuth(a);
-  const d = createFirestoreInstance(a);
+  const loginWindow = isLoginWindow();
+  const a = loginWindow ? initializeApp(config, LOGIN_WINDOW_APP) : initializeApp(config);
+  const au = createAuth(a);
+  const d = loginWindow
+    ? initializeFirestore(a, { localCache: memoryLocalCache() })
+    : createFirestoreInstance(a);
   const st = getStorage(a);
-  setPersistence(au, browserSessionPersistence).catch(() => {});
   const hasAnalytics = config.measurementId && config.measurementId !== "G-XXXXXXXXXX" && config.appId;
   if (hasAnalytics) {
     isSupported().then(yes => (yes ? getAnalytics(a) : null)).then(inst => { analytics = inst ?? undefined; }).catch(() => {});
@@ -175,13 +240,43 @@ function initServicesWithConfig(config: Record<string, string>) {
 
 let firebaseReadyPromise: Promise<void>;
 
-if (apps.length > 0) {
-  app = apps[0];
-  auth = getAuth(app);
-  db = getFirestore(app);
-  storage = getStorage(app);
+/** Local dev only. Production builds ignore this and still require Firebase. */
+export const firebaseOff =
+  import.meta.env.DEV && import.meta.env.VITE_FIREBASE_OFF === "true";
+
+if (firebaseOff) {
+  app = null;
+  auth = null;
+  db = null;
+  storage = null;
+  analytics = null;
   firebaseReadyPromise = Promise.resolve();
-  console.log("✅ Using existing Firebase App (client)");
+  console.warn("Firebase is off for local development (VITE_FIREBASE_OFF).");
+} else if (apps.length > 0) {
+  const loginWindow = isLoginWindow();
+  const existing = apps.find((item) => item.name === (loginWindow ? LOGIN_WINDOW_APP : "[DEFAULT]"));
+  if (existing) {
+    app = existing;
+    auth = getAuth(existing);
+    db = getFirestore(existing);
+    storage = getStorage(existing);
+    firebaseReadyPromise = Promise.resolve();
+    console.log("✅ Using existing Firebase App (client)");
+  } else if (isConfigValid) {
+    try {
+      initServicesWithConfig(firebaseConfig);
+      console.log("✅ Firebase App initialized (client)");
+      firebaseReadyPromise = Promise.resolve();
+    } catch (error) {
+      console.error("❌ Firebase initialization failed:", error);
+      if (import.meta.env.DEV) throw error;
+      app = null; auth = null; db = null; storage = null; analytics = null;
+      firebaseReadyPromise = Promise.reject(error);
+    }
+  } else {
+    auth = null; db = null; storage = null;
+    firebaseReadyPromise = Promise.reject(new Error("Firebase configuration is invalid. Set VITE_FIREBASE_* in .env."));
+  }
 } else if (isConfigValid) {
   try {
     initServicesWithConfig(firebaseConfig);

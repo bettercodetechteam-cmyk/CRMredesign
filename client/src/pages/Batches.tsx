@@ -84,6 +84,47 @@ export interface BatchEntry {
   isManual: boolean;
 }
 
+function studentListName(student: { firstName?: string; lastName?: string; name?: string }): string {
+  const full = [student.firstName, student.lastName].filter((part) => typeof part === "string" && part.trim()).join(" ").trim();
+  return full || student.name || "";
+}
+
+function studentCourseRows(student: {
+  id?: string;
+  course?: string;
+  courses?: unknown;
+  courseEnrollments?: unknown;
+}): { id: string; course: string }[] {
+  const studentId = student.id || "";
+  const enrollments = Array.isArray(student.courseEnrollments) ? student.courseEnrollments : [];
+  const batchByCourse = new Map<string, string>();
+  enrollments.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const record = item as { course?: unknown; courseName?: unknown; batchId?: unknown };
+    const courseName = typeof record.course === "string" ? record.course : typeof record.courseName === "string" ? record.courseName : "";
+    const batchId = typeof record.batchId === "string" ? record.batchId.trim() : "";
+    if (courseName.trim() && batchId) batchByCourse.set(courseName.trim().toLowerCase(), batchId);
+  });
+  const names: string[] = [];
+  const add = (value: unknown) => {
+    if (typeof value !== "string" || !value.trim()) return;
+    if (names.some((name) => name.toLowerCase() === value.trim().toLowerCase())) return;
+    names.push(value.trim());
+  };
+  add(student.course);
+  if (Array.isArray(student.courses)) student.courses.forEach(add);
+  enrollments.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const record = item as { course?: unknown; courseName?: unknown };
+    add(record.course || record.courseName);
+  });
+  if (names.length === 0) return [{ id: studentId, course: "" }];
+  return names.map((course, index) => ({
+    id: index === 0 ? studentId : batchByCourse.get(course.toLowerCase()) || `${studentId}__${course.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
+    course,
+  }));
+}
+
 function parseDate(val: unknown): string {
   if (!val) return "";
   try {
@@ -243,24 +284,26 @@ export default function Batches() {
     students.forEach((student) => {
       const id = student.id;
       if (removedSet.has(id)) return;
-      const e = ent[id] || {};
-      
-      // If student already exists (likely from lead), we can merge or update
-      // Here we prioritize the student record data for name/course
-      studentMap.set(id, {
-        id,
-        no: parseSerialNumber(e.no) || 0,
-        name: e.name ?? (student.firstName || student.name || ""),
-        course: e.course ?? (student.course || ""),
-        subject: e.subject ?? "",
-        slot: e.slot ?? "",
-        time: e.time ?? "",
-        startDate: e.startDate ?? (student.admissionDate ? parseDate(student.admissionDate) : ""),
-        endDate: e.endDate ?? "",
-        expectedEndDate: e.expectedEndDate ?? "",
-        comments: e.comments ?? (student.remarks || ""),
-        teacherId: e.teacherId ?? "",
-        isManual: false,
+      const courseStart = parseDate(student.courseStartDate) || parseDate(student.admissionDate);
+      const courseEnd = parseDate(student.courseEndDate);
+      studentCourseRows(student).forEach((courseRow) => {
+        if (!courseRow.id || removedSet.has(courseRow.id)) return;
+        const courseEntry = ent[courseRow.id] || {};
+        studentMap.set(courseRow.id, {
+          id: courseRow.id,
+          no: parseSerialNumber(courseEntry.no) || 0,
+          name: courseEntry.name ?? studentListName(student),
+          course: courseEntry.course ?? courseRow.course,
+          subject: courseEntry.subject ?? "",
+          slot: courseEntry.slot ?? "",
+          time: courseEntry.time ?? "",
+          startDate: courseEntry.startDate ?? courseStart,
+          endDate: courseEntry.endDate ?? courseEnd,
+          expectedEndDate: courseEntry.expectedEndDate ?? courseEnd,
+          comments: courseEntry.comments ?? (student.remarks || ""),
+          teacherId: courseEntry.teacherId ?? "",
+          isManual: false,
+        });
       });
     });
 

@@ -109,7 +109,14 @@ class FirebaseListenerManager {
    */
   private createListener(collectionName: string, options: ListenerOptions): ActiveListener {
     if (!db) {
-      throw new Error('Firebase database not initialized');
+      this.lastSnapshot.set(this.getListenerKey(collectionName, options), []);
+      return {
+        unsubscribe: () => {},
+        callbacks: new Set(),
+        documentChangeCallbacks: new Set(),
+        collectionName,
+        options,
+      };
     }
 
     // Build query

@@ -30,6 +30,8 @@ const ASSIGNABLE_ROLES = new Set([
   "admin",
   "employee",
   "designer",
+  "student",
+  "parent",
   "pending",
 ]);
 
@@ -53,6 +55,7 @@ const MODULE_PERMISSIONS = new Set([
   "targets",
   "assignments",
   "courses",
+  "syllabus",
 ]);
 
 function normalizeEmail(email?: string | null): string {

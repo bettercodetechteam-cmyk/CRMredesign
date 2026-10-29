@@ -30,15 +30,13 @@ import {
   Layers,
   Package,
   Megaphone,
-  UserCheck,
   Shield,
   CheckSquare,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { usePermissions } from "@/hooks/usePermissions";
 import { useNavigationLoading } from "@/contexts/NavigationLoadingContext";
-import { useApprovalNotifications } from "@/hooks/useApprovalNotifications";
-import type { ModulePermission } from "@shared/permissions";
+import { normalizeRole, type ModulePermission } from "@shared/permissions";
 import Logo from "../assets/Zica Zima.jpg";
 import QuotaMonitor from "./QuotaMonitor";
 import {
@@ -47,6 +45,15 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+function syllabusHref(role?: string | null): string {
+  const normalized = normalizeRole(role);
+  if (normalized === "faculty") return "/syllabus/teach";
+  if (normalized === "student") return "/syllabus/my-class";
+  if (normalized === "parent") return "/syllabus/progress";
+  if (normalized === "centre_head") return "/syllabus/batches";
+  return "/syllabus";
+}
 
 interface SidebarProps {
   open: boolean;
@@ -58,7 +65,6 @@ export default function Sidebar({ open, onOpenChange }: SidebarProps) {
   const navigate = useNavigate();
   const { userProfile } = useAuth();
   const { isDirector, permissions } = usePermissions();
-  const { pendingCount } = useApprovalNotifications();
   const { startNavigation } = useNavigationLoading();
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -106,16 +112,16 @@ export default function Sidebar({ open, onOpenChange }: SidebarProps) {
     { href: "/batches", label: "Batches", icon: Layers, permission: "batches" as ModulePermission },
     { href: "/royalty", label: "Royalty", icon: Crown, permission: "fees" as ModulePermission },
     { href: "/expenses", label: "Expenses", icon: CreditCard, permission: "expenses" as ModulePermission },
-    { href: "/user-approvals", label: "User Approvals", icon: UserCheck, permission: "user_approvals" as ModulePermission },
     { href: "/access-management", label: "Access Management", icon: Shield, permission: "access_management" as ModulePermission },
     { href: "/staff", label: "Staff Management", icon: UserCog, permission: "staff" as ModulePermission },
     { href: "/tasks", label: "Task Management", icon: CheckSquare, permission: "tasks" as ModulePermission },
+    { href: syllabusHref(userProfile?.role), label: "Syllabus", icon: BookOpen, permission: "syllabus" as ModulePermission },
     { href: "/academics", label: "Academics", icon: School, permission: "academics" as ModulePermission },
     { href: "/assets", label: "Assets", icon: Package, permission: "assets" as ModulePermission },
     { href: "/promotional-offers", label: "Promotional Offers", icon: Megaphone, permission: "promotional_offers" as ModulePermission },
     { href: "/blogs", label: "Blog Management", icon: FileText, permission: "blogs" as ModulePermission },
     { href: "/profile", label: "Profile", icon: User, permission: "profile" as ModulePermission },
-  ], [pendingCount]);
+  ], [userProfile?.role]);
 
   const filteredNavItems = useMemo(
     () => navItems.filter((item) => permissions.includes(item.permission)),
@@ -196,7 +202,9 @@ export default function Sidebar({ open, onOpenChange }: SidebarProps) {
           <div className="flex-1 overflow-y-auto h-[calc(100vh-140px)] xs:h-[calc(100vh-150px)] scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
             <nav className="p-2 xs:p-3 sm:p-4 space-y-1 xs:space-y-1.5">
               {filteredNavItems.map((item) => {
-                const isActive = location.pathname === item.href;
+                const isActive = item.permission === "syllabus"
+                  ? location.pathname === item.href || location.pathname.startsWith("/syllabus/")
+                  : location.pathname === item.href;
                 const Icon = item.icon;
 
                 const handleClick = useCallback((e: React.MouseEvent) => {
@@ -228,15 +236,6 @@ export default function Sidebar({ open, onOpenChange }: SidebarProps) {
                         "w-4 h-4 xs:w-5 xs:h-5 transition-all duration-300",
                         isActive ? "text-white" : "text-gray-500 group-hover:text-blue-600"
                       )} />
-                      {/* Pending signup approval badge */}
-                      {item.href === "/user-approvals" && pendingCount > 0 && (
-                        <div className={cn(
-                          "absolute -top-1 -right-1 bg-red-500 text-white text-[10px] xs:text-xs rounded-full flex items-center justify-center font-bold animate-pulse shadow-lg",
-                          open ? "w-4 h-4 xs:w-5 xs:h-5" : "w-3 h-3 xs:w-4 xs:h-4"
-                        )}>
-                          {pendingCount > 99 ? "99+" : pendingCount}
-                        </div>
-                      )}
                     </div>
                     {open && (
                       <span className="animate-in slide-in-from-left-2 duration-200 truncate min-w-0 flex-1">

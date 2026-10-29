@@ -19,6 +19,7 @@ export const MODULE_PERMISSIONS = [
   'assignments',
   'courses',
   'tasks',
+  'syllabus',
 ] as const;
 
 export type ModulePermission = (typeof MODULE_PERMISSIONS)[number];
@@ -52,6 +53,8 @@ export const ASSIGNABLE_ROLES = [
   'admin',
   'employee',
   'designer',
+  'student',
+  'parent',
 ] as const;
 
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
@@ -79,12 +82,13 @@ const ALL_MODULES: ModulePermission[] = [
   'assignments',
   'courses',
   'tasks',
+  'syllabus',
 ];
 
 export const ROLE_DEFAULT_PERMISSIONS: Record<string, ModulePermission[]> = {
   director: ALL_MODULES,
-  academic_head: [...BASE, 'students', 'batches', 'academics', 'staff', 'tasks'],
-  faculty: [...BASE, 'students', 'batches', 'academics', 'staff', 'tasks'],
+  academic_head: [...BASE, 'students', 'batches', 'academics', 'staff', 'tasks', 'syllabus'],
+  faculty: [...BASE, 'students', 'batches', 'academics', 'staff', 'tasks', 'syllabus'],
   accounting: [
     ...BASE,
     'leads',
@@ -100,14 +104,15 @@ export const ROLE_DEFAULT_PERMISSIONS: Record<string, ModulePermission[]> = {
   digital_marketing: [...BASE, 'blogs'],
   bdm: [...BASE, 'leads', 'staff', 'tasks', 'promotional_offers'],
   pending: [],
-  centre_head: [...BASE, 'leads', 'students', 'fees', 'batches', 'expenses', 'academics', 'assets', 'staff', 'promotional_offers'],
+  centre_head: [...BASE, 'leads', 'students', 'fees', 'batches', 'expenses', 'academics', 'assets', 'staff', 'promotional_offers', 'syllabus'],
   marketing: [...BASE, 'leads', 'promotional_offers'],
   admin: [...BASE, 'leads', 'students', 'staff'],
   accountant: [...BASE, 'leads', 'students', 'fees', 'batches', 'expenses', 'assets', 'staff', 'promotional_offers'],
   accounts: [...BASE, 'leads', 'students', 'fees', 'batches', 'expenses', 'assets', 'staff', 'promotional_offers'],
   employee: BASE,
   designer: [...BASE, 'blogs'],
-  student: BASE,
+  student: ['profile', 'syllabus'],
+  parent: ['profile', 'syllabus'],
 };
 
 export const MODULE_LABELS: Record<ModulePermission, string> = {
@@ -131,6 +136,7 @@ export const MODULE_LABELS: Record<ModulePermission, string> = {
   assignments: 'Assignments',
   courses: 'Courses',
   tasks: 'Task Management',
+  syllabus: 'Syllabus',
 };
 
 export const ROUTE_PERMISSION_MAP: Record<string, ModulePermission> = {
@@ -167,6 +173,12 @@ export const ROUTE_PERMISSION_MAP: Record<string, ModulePermission> = {
   '/assignments': 'assignments',
   '/tasks': 'tasks',
   '/performance': 'reports',
+  '/syllabus': 'syllabus',
+  '/syllabus/batches': 'syllabus',
+  '/syllabus/teach': 'syllabus',
+  '/syllabus/my-class': 'syllabus',
+  '/syllabus/dashboard': 'syllabus',
+  '/syllabus/progress': 'syllabus',
 };
 
 export function normalizeRole(role?: string | null): string {
@@ -218,7 +230,22 @@ export function getRoutePermission(pathname: string): ModulePermission | null {
   if (pathname.startsWith('/blogs/edit/')) return 'blogs';
   if (pathname.startsWith('/academics/')) return 'academics';
   if (pathname.startsWith('/tasks/')) return 'tasks';
+  if (pathname.startsWith('/syllabus/')) return 'syllabus';
   return null;
+}
+
+export function homePathForRole(role?: string | null): string {
+  const normalized = normalizeRole(role);
+  if (normalized === 'student') return '/syllabus/my-class';
+  if (normalized === 'parent') return '/syllabus/progress';
+  if (normalized === 'faculty') return '/syllabus/teach';
+  return '/dashboard';
+}
+
+/** Student and parent accounts cannot read CRM collections such as leads or reminders. */
+export function isLearnerRole(role?: string | null): boolean {
+  const normalized = normalizeRole(role);
+  return normalized === 'student' || normalized === 'parent';
 }
 
 export function getMigrationRoleForEmail(email?: string | null): string | null {

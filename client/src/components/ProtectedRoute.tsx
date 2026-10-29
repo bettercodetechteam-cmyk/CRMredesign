@@ -3,7 +3,7 @@ import { useAuth, useRole } from '../hooks/useAuth';
 import { usePermissions } from '@/hooks/usePermissions';
 import Loading from '@/components/ui/loading';
 import { Navigate, useLocation } from 'react-router-dom';
-import type { ModulePermission } from '@shared/permissions';
+import { homePathForRole, normalizeRole, type ModulePermission } from '@shared/permissions';
 
 interface ProtectedRouteProps {
   children?: React.ReactNode;
@@ -27,10 +27,6 @@ export default function ProtectedRoute({ children, element, allowedRoles }: Prot
 
   if (!userProfile) {
     return <Navigate to="/login" state={{ from: location }} replace />;
-  }
-
-  if (!userProfile.approved) {
-    return <Navigate to="/pending-approval" replace />;
   }
 
   if (allowedRoles && !allowedRoles.includes(userProfile.role)) {
@@ -62,11 +58,11 @@ export function PermissionRoute({ children, permission }: PermissionRouteProps) 
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  if (!userProfile.approved) {
-    return <Navigate to="/pending-approval" replace />;
-  }
-
   if (!canAccess(permission)) {
+    const role = normalizeRole(userProfile.role);
+    if (permission === 'dashboard' && (role === 'student' || role === 'parent')) {
+      return <Navigate to={homePathForRole(role)} replace />;
+    }
     return <Navigate to="/unauthorized" replace />;
   }
 

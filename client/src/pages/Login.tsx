@@ -10,8 +10,8 @@ import { Loader2, Eye, EyeOff, Mail, Lock, AlertCircle, CheckCircle, ArrowLeft, 
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
 import { createUserWithEmailAndPassword, fetchSignInMethodsForEmail, signOut } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp, collection, query, where, getDocs, getDoc, updateDoc, addDoc } from 'firebase/firestore';
-import { auth, db } from '@/lib/firebase';
+import { doc, setDoc, serverTimestamp, collection, query, where, getDocs, getDoc, updateDoc } from 'firebase/firestore';
+import { auth, db, takeLoginWindowCredentials } from '@/lib/firebase';
 import { emailService } from '@/lib/emailService';
 
 import bettercodeLogo from "@/assets/abettercode logo updated.png";
@@ -19,6 +19,7 @@ import zicaZimaLogo from "@/assets/Zica Zima.jpg";
 import NotificationPopup from '../components/NotificationPopup';
 import { NoiseBackground } from "@/components/ui/noise-background";
 import { useNavigate } from 'react-router-dom';
+import { homePathForRole } from '@shared/permissions';
 
 
 type LoginMode = 'login' | 'forgot-password' | 'reset-password' | 'create-account';
@@ -60,6 +61,13 @@ export default function Login() {
   const { signIn, resetPassword, signUp, login } = useAuth();
   const { toast } = useToast();
 
+  useEffect(() => {
+    const credentials = takeLoginWindowCredentials();
+    if (!credentials) return;
+    setEmail(credentials.email);
+    setPassword(credentials.password);
+  }, []);
+
 
   // Notification helper functions
   const showNotification = (type: 'success' | 'error' | 'info' | 'warning', title: string, message: string) => {
@@ -80,11 +88,8 @@ export default function Login() {
     setIsSigningIn(true);
 
     try {
-      await signIn(email, password);
-      showNotification('success', 'Login Successful!', 'Welcome back to ZICA CRM');
-      setTimeout(() => {
-        navigate('/dashboard');
-      }, 1500);
+      const role = await signIn(email, password);
+      navigate(homePathForRole(role));
     } catch (error: any) {
       console.error("Login failed:", error);
       showNotification('error', 'Login Failed', error.message || "Invalid email or password");
@@ -95,6 +100,10 @@ export default function Login() {
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!email.includes("@")) {
+      showNotification("error", "Email required", "Password reset is sent to an email. Sign in with the mobile number and the password shown when the login was linked.");
+      return;
+    }
 
     try {
       // Check if user exists in Firestore
@@ -248,16 +257,7 @@ export default function Login() {
     }
 
     try {
-      // Check for existing user by email in both Auth and Firestore
-      const q = query(collection(db, 'users'), where('email', '==', email));
-      const querySnapshot = await getDocs(q);
-      
-      if (!querySnapshot.empty) {
-        showNotification('error', 'Account Already Exists', 'An account with this email already exists');
-        return;
-      }
-
-      // Also check if user exists in Firebase Auth
+      // A signed-out visitor cannot list users. Auth reports a duplicate email.
       try {
         const methods = await fetchSignInMethodsForEmail(auth, email);
         if (methods.length > 0) {
@@ -295,22 +295,11 @@ export default function Login() {
       });
 
       // Create approval notification for directors/centre heads
-      await addDoc(collection(db, 'approvalRequests'), {
-        userId: uid,
-        userEmail: email,
-        userRole: 'pending',
-        userName: `${firstName} ${lastName}`,
-        status: 'pending',
-        createdAt: serverTimestamp(),
-        type: 'user_approval'
-      });
-
-      // Send welcome email
       await emailService.sendWelcomeEmail(email, firstName);
 
       await signOut(auth);
 
-      showNotification('success', 'Account Created Successfully!', 'Your account has been created and is pending director approval.');
+      showNotification('success', 'Account Created Successfully!', 'Your account is ready. Sign in with the email and password you just created.');
 
       // Reset form
       setEmail('');
@@ -361,16 +350,17 @@ export default function Login() {
     <form onSubmit={handleLogin} className="space-y-1 sm:space-y-2">
       <div className="space-y-1">
         <Label htmlFor="email" className="text-sm font-semibold text-white">
-          Email Address
+          Email or mobile number
         </Label>
         <div className="relative group">
           <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-500 group-focus-within:text-blue-600 transition-all duration-300" />
           <Input
             id="email"
-            type="email"
+            type="text"
+            inputMode="text"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="Enter your email address"
+            placeholder="Email or 10-digit mobile number"
             className="pl-10 h-10 sm:h-11 border-gray-300 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg text-sm transition-all duration-300 shadow-sm hover:shadow-md group-focus-within:shadow-lg group-focus-within:border-blue-500 bg-white text-gray-900 placeholder-gray-500"
             required
             autoComplete="username"
@@ -874,6 +864,14 @@ export default function Login() {
                 >
                   Create New Account
                 </button>
+                <div className="mt-2">
+                  <a
+                    href="/test-credentials"
+                    className="text-xs sm:text-sm text-blue-100 hover:text-white font-medium underline"
+                  >
+                    View test logins
+                  </a>
+                </div>
               </div>
             )}
           </div>

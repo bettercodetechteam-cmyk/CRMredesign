@@ -1,4 +1,4 @@
-﻿import type { Express } from "express";
+import express, { type Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storageFirebaseOnly";
 import ImageKit from "imagekit";
@@ -8,7 +8,11 @@ import { reminderScheduler } from "./services/reminderScheduler";
 import AuthService from "./services/authService";
 import { IamService } from "./services/iamService";
 import { requireDirector } from "./middleware/requireDirector";
-import { requireAuth, requireTaskDirector } from "./middleware/requireAuth";
+import { optionalCaller, requireAuth, requireTaskDirector } from "./middleware/requireAuth";
+import { curriculumFilePath, deleteCurriculumFile, imageKitReady, listCurriculumFiles, saveCurriculumFile } from "./curriculumStore";
+import { SyllabusError, SyllabusService } from "./services/syllabusService";
+import { registerSyllabusRoutes } from "./syllabusRoutes";
+import { registerAnnualGstRoutes } from "./annualGstRoutes";
 import { TaskService } from "./services/taskService";
 import { getFirebaseAdmin } from "./firebaseConfig";
 import { imageKitService } from "./services/imageKitService";
@@ -27,6 +31,8 @@ export const roleContext = {
 };
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  registerSyllabusRoutes(app);
+  registerAnnualGstRoutes(app);
   const toDate = (value: any): Date | null => {
     if (!value) return null;
     if (value instanceof Date) return value;
@@ -1296,9 +1302,78 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(result);
   });
 
+  app.get("/api/curriculum/mode", (_req, res) => {
+    res.json({ mode: imageKitReady() ? "imagekit" : "local" });
+  });
+
+  app.post("/api/curriculum/upload", express.raw({ type: () => true, limit: "25mb" }), async (req, res) => {
+    try {
+      const folder = typeof req.query.folder === "string" ? req.query.folder : "";
+      const name = typeof req.query.name === "string" ? req.query.name : "";
+      const file = Buffer.isBuffer(req.body) ? req.body : null;
+      if (!file?.length || !name.trim()) {
+        res.status(400).json({ error: "Choose a file to upload." });
+        return;
+      }
+      const saved = imageKitReady()
+        ? await (async () => {
+            const uploaded = await imagekit.upload({
+              file,
+              fileName: name,
+              folder: `/${folder.replace(/^\/+/, "")}`,
+            });
+            return {
+              name: uploaded.name,
+              url: uploaded.url,
+              path: uploaded.filePath,
+              filePath: uploaded.filePath,
+              fileId: uploaded.fileId,
+              size: uploaded.size,
+            };
+          })()
+        : saveCurriculumFile(folder, name, file);
+
+      let courseName = "";
+      let courseWarning = "";
+      const extension = name.split(".").pop()?.toLowerCase() || "";
+      if (["pdf", "doc", "docx", "xls", "xlsx"].includes(extension)) {
+        const caller = await optionalCaller(req);
+        const adminBundle = caller ? await getFirebaseAdmin() : null;
+        if (caller && adminBundle?.adminDb) {
+          try {
+            const imported = await new SyllabusService(adminBundle.adminDb).importCourseFile(caller, file, name);
+            courseName = imported.syllabus.courseName;
+          } catch (error) {
+            courseWarning = error instanceof SyllabusError
+              ? error.message
+              : "This file was saved, but it could not be added as a course.";
+          }
+        }
+      }
+      res.json({ ...saved, courseName, courseWarning });
+    } catch (err: any) {
+      const tooLarge = err?.type === "entity.too.large";
+      res.status(tooLarge ? 413 : 500).json({ error: tooLarge ? "Choose a file of 25 MB or less." : (err?.message || "Upload failed") });
+    }
+  });
+
+  app.get("/api/curriculum/file", (req, res) => {
+    const rel = typeof req.query.path === "string" ? req.query.path : "";
+    const full = curriculumFilePath(rel);
+    if (!full) {
+      res.status(404).json({ error: "File not found." });
+      return;
+    }
+    res.sendFile(full);
+  });
+
   // ImageKit List Files Endpoint
   app.get("/api/list-files", async (req, res) => {
     try {
+      if (!imageKitReady()) {
+        res.json(listCurriculumFiles());
+        return;
+      }
       const result = await imagekit.listFiles({});
       res.json(result);
     } catch (err: any) {
@@ -1315,6 +1390,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "fileId is required" });
       }
       const id = String(fileId).trim();
+      if (id.startsWith("local:")) {
+        deleteCurriculumFile(id);
+        res.json({ success: true });
+        return;
+      }
       const result = await imagekit.deleteFile(id);
       res.json({ success: true, result });
     } catch (err: any) {

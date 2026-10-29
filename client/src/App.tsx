@@ -45,8 +45,14 @@ const BlogEditor = lazy(() => import("@/pages/BlogEditor"));
 const AccessManagement = lazy(() => import("@/pages/AccessManagement"));
 const Tasks = lazy(() => import("@/pages/Tasks"));
 const TaskDetail = lazy(() => import("@/pages/TaskDetail"));
+const SyllabusSetup = lazy(() => import("@/pages/syllabus/SyllabusSetup"));
+const BatchPlansPage = lazy(() => import("@/pages/syllabus/BatchPlans"));
+const BatchPlanDetailPage = lazy(() => import("@/pages/syllabus/BatchPlanDetail"));
+const TeacherLessons = lazy(() => import("@/pages/syllabus/TeacherLessons"));
+const StudentFeedback = lazy(() => import("@/pages/syllabus/StudentFeedback"));
+const ParentProgress = lazy(() => import("@/pages/syllabus/ParentProgress"));
+const CoordinatorDashboard = lazy(() => import("@/pages/syllabus/CoordinatorDashboard"));
 const Unauthorized = lazy(() => import("@/pages/Unauthorized"));
-const PendingApproval = lazy(() => import("@/pages/PendingApproval"));
 
 
 const FeeAlerts = lazy(() => import("@/pages/FeeAlerts"));
@@ -66,7 +72,7 @@ const BettercodeDashboard = lazy(() => import("@/pages/bettercode/BettercodeDash
 const BettercodeQuotation = lazy(() => import("@/pages/bettercode/BettercodeQuotation"));
 const BettercodeInvoice = lazy(() => import("@/pages/bettercode/BettercodeInvoice"));
 
-import type { ModulePermission } from "@shared/permissions";
+import { homePathForRole, type ModulePermission } from "@shared/permissions";
 
 function PermPage({
   permission,
@@ -137,20 +143,7 @@ function Router() {
     return <LoadingSpinner />;
   }
 
-  // If authenticated but pending approval
-  if (userProfile && userProfile.approved === false) {
-    return (
-      <ErrorBoundary>
-        <Routes>
-          <Route path="/pending-approval" element={<PendingApproval />} />
-          <Route path="*" element={<Navigate to="/pending-approval" replace />} />
-        </Routes>
-      </ErrorBoundary>
-    );
-  }
-
-  // If authenticated, render the full app (with router and all pages)
-  if (userProfile && userProfile.approved !== false) {
+  if (userProfile) {
     return (
       <ErrorBoundary>
         <NetworkErrorBoundary>
@@ -173,6 +166,8 @@ function Router() {
               </Suspense>
             } />
             <Route path="/bettercode" element={<Navigate to="/bettercode/dashboard" replace />} />
+            <Route path="/test-credentials" element={<TestCredentials />} />
+            <Route path="/login" element={<Navigate to={homePathForRole(userProfile.role)} replace />} />
             {/* Receipt page - no layout/sidebar */}
             <Route path="/receipt" element={
               <PermPage permission="fees"><ReceiptPage /></PermPage>
@@ -200,6 +195,14 @@ function Router() {
               <Route path="/user-approvals" element={<PermPage permission="user_approvals"><UserApprovals /></PermPage>} />
               <Route path="/access-management" element={<PermPage permission="access_management"><AccessManagement /></PermPage>} />
               <Route path="/staff" element={<PermPage permission="staff"><Staff /></PermPage>} />
+              <Route path="/syllabus" element={<PermPage permission="syllabus"><SyllabusSetup /></PermPage>} />
+              <Route path="/syllabus/batches" element={<PermPage permission="syllabus"><BatchPlansPage /></PermPage>} />
+              <Route path="/syllabus/batches/:batchId" element={<PermPage permission="syllabus"><BatchPlanDetailPage /></PermPage>} />
+              <Route path="/syllabus/teach" element={<PermPage permission="syllabus"><TeacherLessons /></PermPage>} />
+              <Route path="/syllabus/my-class" element={<PermPage permission="syllabus"><StudentFeedback /></PermPage>} />
+              <Route path="/syllabus/progress" element={<PermPage permission="syllabus"><ParentProgress /></PermPage>} />
+              <Route path="/syllabus/progress/:studentId" element={<PermPage permission="syllabus"><ParentProgress /></PermPage>} />
+              <Route path="/syllabus/dashboard" element={<PermPage permission="syllabus"><CoordinatorDashboard /></PermPage>} />
               <Route path="/tasks" element={<PermPage permission="tasks"><Tasks /></PermPage>} />
               <Route path="/tasks/:taskId" element={<PermPage permission="tasks"><TaskDetail /></PermPage>} />
               <Route path="/royalty" element={<PermPage permission="fees"><Royalty /></PermPage>} />

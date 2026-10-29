@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { centreDataStore, type LeadRecord } from '@/lib/centreDataStore';
+import { isLearnerRole } from '@shared/permissions';
 
 export interface CentreDataContextValue {
   leads: LeadRecord[];
@@ -27,7 +28,7 @@ export function CentreDataProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   useEffect(() => {
-    if (centreId || userProfile?.role === 'director' || userProfile?.role === 'centre_head') {
+    if (!isLearnerRole(userProfile?.role) && (centreId || userProfile?.role === 'director' || userProfile?.role === 'centre_head')) {
       centreDataStore.init({ centreId: centreId || 'global', role: userProfile?.role });
     } else {
       centreDataStore.cleanup();

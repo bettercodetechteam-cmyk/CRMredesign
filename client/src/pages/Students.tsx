@@ -390,6 +390,7 @@ export default function Students() {
             updatedAt: convertTimestamp(student.updatedAt),
             admissionDate: convertTimestamp(student.admissionDate),
             courseStartDate: convertTimestamp(student.courseStartDate),
+            courseEndDate: convertTimestamp(student.courseEndDate),
             feesPaidDate: convertTimestamp(student.feesPaidDate),
             dueDate: convertTimestamp(student.dueDate),
             followUpDate: convertTimestamp(student.followUpDate),
@@ -410,8 +411,10 @@ export default function Students() {
             zicaSubCategory: processed.zicaSubCategory || '',
             feesStructure: processed.feesStructure || '',
             course: processed.course || processed.courseInterest || processed.program || '',
+            courses: Array.isArray(processed.courses) ? processed.courses.filter((name: unknown) => typeof name === "string" && name.trim()) : [],
             courseDuration: processed.courseDuration || processed.duration || '',
             courseStartDate: processed.courseStartDate || processed.startDate || processed.admissionDate,
+            courseEndDate: processed.courseEndDate || processed.endDate,
             actualFees: processed.actualFees || processed.fees || processed.totalFees || '0',
             discountedFees: processed.discountedFees || processed.discount || '0',
             feesPaid: processed.feesPaid || processed.paidAmount || processed.amountPaid || '0',
@@ -553,7 +556,7 @@ export default function Students() {
       const fullName = `${student.firstName || ''} ${student.lastName || ''}`.toLowerCase();
       const matchesSearch = fullName.includes(debouncedSearchTerm.toLowerCase()) ||
                            student.email?.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-                           student.course?.toLowerCase().includes(debouncedSearchTerm.toLowerCase());
+                           [student.course, ...(Array.isArray(student.courses) ? student.courses : [])].join(" ").toLowerCase().includes(debouncedSearchTerm.toLowerCase());
       return matchesSearch;
     });
     return filtered;
@@ -1356,7 +1359,7 @@ export default function Students() {
       const headers = [
         'Sr No.', 'Student Name', 'Contact Number', 'Email', 'Date of Admission',
         'ZICA/ZIMA', 'Fees Structure', 'Course', 'Course Duration', 'Course Start Date',
-        'Actual Fees', 'Discounted Fees', 'Fees Paid', 'Fees Paid Date', 'Fees Balance',
+        'Course End Date', 'Actual Fees', 'Discounted Fees', 'Fees Paid', 'Fees Paid Date', 'Fees Balance',
         'Payment Mode', 'No. of Installments', 'Installments Paid', 'Remaining Installments',
         'Remarks', 'Centre ID', 'Created At', 'Updated At'
       ];
@@ -1371,9 +1374,10 @@ export default function Students() {
           formatDate(student.admissionDate) || '',
           student.zicaZima || '',
           student.feesStructure || '',
-          student.course || '',
+          (Array.isArray(student.courses) && student.courses.length > 1 ? student.courses.join(", ") : student.course) || '',
           student.courseDuration || '',
           formatDate(student.courseStartDate) || '',
+          student.courseEndDate ? formatDate(student.courseEndDate) : '',
           student.actualFees || '',
           student.discountedFees || '',
           student.feesPaid || '',
@@ -1531,6 +1535,7 @@ export default function Students() {
                           <SortableTableHead className="min-w-[150px] font-semibold text-slate-700 py-3 text-xs sm:text-sm" sortConfig={sortConfig} sortKey="course" requestSort={requestSort}>Course</SortableTableHead>
                           <SortableTableHead className="min-w-[100px] font-semibold text-slate-700 py-3 text-xs sm:text-sm text-center" sortConfig={sortConfig} sortKey="courseDuration" requestSort={requestSort}>Duration</SortableTableHead>
                           <SortableTableHead className="min-w-[150px] font-semibold text-slate-700 py-3 text-xs sm:text-sm" sortConfig={sortConfig} sortKey="courseStartDate" requestSort={requestSort}>Start Date</SortableTableHead>
+                          <SortableTableHead className="min-w-[150px] font-semibold text-slate-700 py-3 text-xs sm:text-sm" sortConfig={sortConfig} sortKey="courseEndDate" requestSort={requestSort}>End Date</SortableTableHead>
                           <SortableTableHead className="min-w-[120px] text-right font-semibold text-slate-700 py-3 text-xs sm:text-sm" sortConfig={sortConfig} sortKey="actualFees" requestSort={requestSort}>Actual Fees</SortableTableHead>
                           <SortableTableHead className="min-w-[120px] text-right font-semibold text-slate-700 py-3 text-xs sm:text-sm" sortConfig={sortConfig} sortKey="discountedFees" requestSort={requestSort}>Discounted</SortableTableHead>
                           <SortableTableHead className="min-w-[120px] text-right font-semibold text-slate-700 py-3 text-xs sm:text-sm" sortConfig={sortConfig} sortKey="feesPaid" requestSort={requestSort}>Paid Fees</SortableTableHead>
@@ -1546,7 +1551,7 @@ export default function Students() {
                       <TableBody>
                         {currentStudents.length === 0 ? (
                           <TableRow>
-                            <TableCell colSpan={19} className="h-32 text-center text-slate-500">
+                            <TableCell colSpan={20} className="h-32 text-center text-slate-500">
                               No students found.
                             </TableCell>
                           </TableRow>
@@ -1572,9 +1577,10 @@ export default function Students() {
                                 </Badge>
                               </TableCell>
                               <TableCell className="text-slate-600">{safeRender(student.feesStructure)}</TableCell>
-                              <TableCell className="text-slate-900 font-medium">{safeRender(student.course)}</TableCell>
+                              <TableCell className="text-slate-900 font-medium">{safeRender(Array.isArray(student.courses) && student.courses.length > 1 ? student.courses.join(", ") : student.course)}</TableCell>
                               <TableCell className="text-center text-slate-600">{safeRender(student.courseDuration)} m</TableCell>
                               <TableCell className="text-slate-600">{formatDate(student.courseStartDate)}</TableCell>
+                              <TableCell className="text-slate-600">{student.courseEndDate ? formatDate(student.courseEndDate) : ""}</TableCell>
                               <TableCell className="text-right font-medium text-slate-900">
                                 {student.actualFees ? `₹${parseFloat(safeRender(student.actualFees)).toLocaleString()}` : '₹0'}
                               </TableCell>

@@ -34,7 +34,7 @@ import { toast } from "@/hooks/use-toast";
 import ImageKit from "imagekit-javascript";
 import { getCleanFileName } from "@/lib/utils";
 import { IMAGEKIT_CONFIG, getImageKitAuthParams, initializeImageKit, testImageKitConfig } from "@/lib/imagekitConfig";
-import { getAcademicApiUrl, getDeleteFileUrl, fetchWithRetry, parseListFilesResponse } from "@/lib/academicFileApi";
+import { getAcademicApiUrl, getDeleteFileUrl, fetchWithRetry, parseListFilesResponse, uploadAcademicFile } from "@/lib/academicFileApi";
 import { EnhancedFileViewer } from "@/components/EnhancedFileViewer";
 import { openFileInNewTab } from "@/lib/fileViewerUtils";
 import { InlineLoading } from "@/components/ui/loading";
@@ -140,38 +140,39 @@ export default function ZicaManagement() {
     }
     setUploading(true);
     try {
-      const uploadPromises = Array.from(selectedFiles).map(async (file) => {
-        const { token, expire, signature } = await getImageKitAuthParams();
-        return new Promise<FileItem>((resolve, reject) => {
-          console.log("Uploading file:", file.name);
-          imagekit.upload(
-            {
-              file: file,
-              fileName: file.name,
-              token,
-              expire,
-              signature,
-              folder: currentFolder,
-            },
-            (err: any, result: any) => {
-              if (err) {
-                const errorMsg = err instanceof Error ? err.message : JSON.stringify(err);
-                console.error("ImageKit upload error:", errorMsg);
-                reject(err);
-              } else if (result && result.url) {
-                console.log("ImageKit upload success:", result);
-                resolve({ name: file.name, url: result.url, type: 'file', path: result.filePath, fileId: result.fileId });
-              } else {
-                reject(new Error("Unknown upload error"));
-              }
-            }
-          );
+      const files = Array.from(selectedFiles);
+      const uploadedFiles: FileItem[] = [];
+      const courseNames: string[] = [];
+      const warnings: string[] = [];
+      for (let index = 0; index < files.length; index += 3) {
+        const batch = files.slice(index, index + 3);
+        const saved = await Promise.all(batch.map(async (file) => {
+          const result = await uploadAcademicFile(file, file.name, currentFolder, async () => {
+            const { token, expire, signature } = await getImageKitAuthParams();
+            return new Promise((resolve, reject) => {
+              imagekit.upload(
+                { file, fileName: file.name, token, expire, signature, folder: currentFolder },
+                (err: any, uploaded: any) => {
+                  if (err) reject(err);
+                  else if (uploaded?.url) resolve({ name: file.name, url: uploaded.url, path: uploaded.filePath, fileId: uploaded.fileId });
+                  else reject(new Error("Unknown upload error"));
+                },
+              );
+            });
+          });
+          return { file, result };
+        }));
+        saved.forEach(({ file, result }) => {
+          uploadedFiles.push({ name: result.name || file.name, url: result.url, type: "file", path: result.path || result.filePath, fileId: result.fileId });
+          if (result.courseName) courseNames.push(result.courseName);
+          if (result.courseWarning) warnings.push(`${file.name}: ${result.courseWarning}`);
         });
-      });
-      const uploadedFiles = await Promise.all(uploadPromises);
+      }
+      const courseNote = courseNames.length > 0 ? ` ${courseNames.length} added as courses.` : "";
+      const warningNote = warnings.length > 0 ? ` ${warnings.length} could not be read as a syllabus.` : "";
       toast({
         title: "Success",
-        description: `${selectedFiles.length} file(s) uploaded successfully`,
+        description: `${uploadedFiles.length} file(s) uploaded.${courseNote}${warningNote}`,
       });
       setSelectedFiles(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -181,9 +182,10 @@ export default function ZicaManagement() {
       console.error("Upload failed:", errorMsg);
       toast({
         title: "Error",
-        description: "Failed to upload files",
+        description: errorMsg || "Failed to upload files",
         variant: "destructive",
       });
+      loadFiles(currentFolder);
     } finally {
       setUploading(false);
     }
@@ -263,18 +265,20 @@ export default function ZicaManagement() {
     }
     setCreatingFolder(true);
     try {
-      const { token, expire, signature } = await getImageKitAuthParams();
-      await new Promise((resolve, reject) => {
-        imagekit.upload({
-          file: new Blob(["keep"], { type: "text/plain" }),
-          fileName: ".keep",
-          token,
-          expire,
-          signature,
-          folder: folderPath,
-        }, (err: any, result: any) => {
-          if (err) reject(err);
-          else resolve(result);
+      await uploadAcademicFile(new Blob(["keep"], { type: "text/plain" }), ".keep", folderPath, async () => {
+        const { token, expire, signature } = await getImageKitAuthParams();
+        return new Promise((resolve, reject) => {
+          imagekit.upload({
+            file: new Blob(["keep"], { type: "text/plain" }),
+            fileName: ".keep",
+            token,
+            expire,
+            signature,
+            folder: folderPath,
+          }, (err: any, result: any) => {
+            if (err) reject(err);
+            else resolve(result);
+          });
         });
       });
       setShowNewFolderModal(false);

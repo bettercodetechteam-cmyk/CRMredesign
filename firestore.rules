@@ -19,7 +19,62 @@ service cloud.firestore {
     }
 
     function isApproved() {
-      return signedIn() && userDoc().approved == true;
+      return signedIn();
+    }
+
+    function roleLower() {
+      return userDoc().get('role', '').lower();
+    }
+
+    function isDirectorEmail() {
+      return signedIn() && userDoc().get('email', '').lower() in [
+        'cmzicazima@gmail.com',
+        'gauravkarewar724@gmail.com',
+        'director@zica.edu'
+      ];
+    }
+
+    function isStaffAccount() {
+      return isApproved() && roleLower() != 'parent' && roleLower() != 'student';
+    }
+
+    function isCoordinatorRole() {
+      return isStaffAccount() && (
+        roleLower() == 'director' ||
+        roleLower() == 'academic_head' ||
+        roleLower() == 'centre_head' ||
+        isDirectorEmail()
+      );
+    }
+
+    function isFacultyRole() {
+      return isStaffAccount() && (
+        roleLower() == 'faculty' ||
+        roleLower() == 'senior_faculty' ||
+        roleLower() == 'senior faculty'
+      );
+    }
+
+    function isSyllabusCollection(name) {
+      return name == 'syllabi'
+        || name == 'syllabusVersions'
+        || name == 'batchPlans'
+        || name == 'topicSchedules'
+        || name == 'lessonUpdates'
+        || name == 'topicFeedback'
+        || name == 'parentLinks';
+    }
+
+    function parentLinkExists(studentId) {
+      return exists(/databases/$(database)/documents/parentLinks/$(request.auth.uid + '_' + studentId));
+    }
+
+    function planFaculty(batchId) {
+      return get(/databases/$(database)/documents/batchPlans/$(batchId)).data.get('facultyUid', '') == request.auth.uid;
+    }
+
+    function topicTeacher(batchId, topicId) {
+      return get(/databases/$(database)/documents/topicSchedules/$(batchId + '_' + topicId)).data.get('teacherUid', '') == request.auth.uid;
     }
 
     function iamFieldsChanged() {
@@ -60,66 +115,75 @@ service cloud.firestore {
     // Module collections: require approved authenticated users.
     // Fine-grained module checks are enforced in the client and Cloud Functions.
     match /leads/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /students/{docId} {
-      allow read, write: if isApproved();
+      allow read: if isStaffAccount()
+        || (isApproved() && roleLower() == 'student' && resource.data.get('studentUid', '') == request.auth.uid)
+        || (isApproved() && roleLower() == 'parent' && parentLinkExists(docId));
+      allow create: if isStaffAccount()
+        && request.resource.data.get('studentUid', null) == null
+        && request.resource.data.get('syllabusBatchId', null) == null;
+      allow update: if isStaffAccount()
+        && request.resource.data.get('studentUid', null) == resource.data.get('studentUid', null)
+        && request.resource.data.get('syllabusBatchId', null) == resource.data.get('syllabusBatchId', null);
+      allow delete: if isStaffAccount();
     }
 
     match /fees/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /feeTransactions/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /batches/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /expenses/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /assets/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /staff/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /staffDirectory/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /promotionalOffers/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /blogs/{docId} {
-      // Public website: published posts only. CRM: approved users see all (including drafts).
-      allow read: if isApproved()
+      // Public website: published posts only. CRM staff see drafts.
+      allow read: if isStaffAccount()
         || resource.data.get('status', 'published') == 'published';
-      allow write: if isApproved();
+      allow write: if isStaffAccount();
     }
 
     match /reminders/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /reminderNotifications/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /smsMessages/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /emailQueue/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount();
     }
 
     match /passwordResetOTPs/{docId} {
@@ -173,8 +237,96 @@ service cloud.firestore {
       }
     }
 
+    function lessonTaught(batchId, topicId) {
+      let status = get(/databases/$(database)/documents/lessonUpdates/$(batchId + '_' + topicId)).data.get('status', '');
+      return status == 'not_covered' || status == 'partly_covered' || status == 'completed';
+    }
+
+    function studentBatchMatches(studentId, batchId) {
+      let student = get(/databases/$(database)/documents/students/$(studentId)).data;
+      let explicit = student.get('syllabusBatchId', '');
+      return student.get('studentUid', '') == request.auth.uid && (
+        (explicit != '' && explicit == batchId) ||
+        (explicit == '' && studentId == batchId)
+      );
+    }
+
+    match /syllabi/{docId} {
+      allow read: if isCoordinatorRole() || isFacultyRole();
+      allow write: if false;
+    }
+
+    match /syllabusVersions/{docId} {
+      allow read: if isCoordinatorRole() || isFacultyRole();
+      allow write: if false;
+    }
+
+    match /batchPlans/{docId} {
+      allow read: if isCoordinatorRole() || (
+        isFacultyRole() && (
+          resource.data.facultyUid == request.auth.uid ||
+          request.auth.uid in resource.data.get('teacherUids', [])
+        )
+      );
+      allow write: if false;
+    }
+
+    match /topicSchedules/{docId} {
+      allow read: if isCoordinatorRole() || (
+        isFacultyRole() && (
+          resource.data.teacherUid == request.auth.uid ||
+          planFaculty(resource.data.batchId)
+        )
+      );
+      allow write: if false;
+    }
+
+    match /lessonUpdates/{docId} {
+      allow read: if isCoordinatorRole() || (
+        isFacultyRole() && (
+          planFaculty(resource.data.batchId) ||
+          topicTeacher(resource.data.batchId, resource.data.topicId)
+        )
+      );
+      allow write: if false;
+    }
+
+    match /topicFeedback/{docId} {
+      allow read: if isCoordinatorRole()
+        || (isApproved() && resource.data.studentUid == request.auth.uid)
+        || (isFacultyRole() && (
+          planFaculty(resource.data.batchId) ||
+          topicTeacher(resource.data.batchId, resource.data.topicId)
+        ));
+      allow create: if isApproved()
+        && roleLower() == 'student'
+        && request.resource.data.studentUid == request.auth.uid
+        && docId == request.resource.data.batchId + '_' + request.resource.data.topicId + '_' + request.resource.data.studentId
+        && studentBatchMatches(request.resource.data.studentId, request.resource.data.batchId)
+        && lessonTaught(request.resource.data.batchId, request.resource.data.topicId)
+        && request.resource.data.understanding in ['understood', 'partly_understood', 'need_help']
+        && request.resource.data.keys().hasOnly([
+          'batchId', 'topicId', 'studentId', 'studentUid', 'understanding', 'comment', 'updatedAt'
+        ]);
+      allow update: if isApproved()
+        && resource.data.studentUid == request.auth.uid
+        && request.resource.data.studentUid == resource.data.studentUid
+        && request.resource.data.studentId == resource.data.studentId
+        && request.resource.data.batchId == resource.data.batchId
+        && request.resource.data.topicId == resource.data.topicId
+        && request.resource.data.understanding in ['understood', 'partly_understood', 'need_help']
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['understanding', 'comment', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /parentLinks/{docId} {
+      allow read: if isCoordinatorRole()
+        || (isApproved() && resource.data.parentUid == request.auth.uid);
+      allow write: if false;
+    }
+
     match /{collection}/{docId} {
-      allow read, write: if isApproved();
+      allow read, write: if isStaffAccount() && !isSyllabusCollection(collection);
     }
   }
 }
