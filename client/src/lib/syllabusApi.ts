@@ -13,6 +13,7 @@ import type {
   SyllabusMeta,
   SyllabusModule,
   SyllabusPdfPreview,
+  SyllabusPdfWarning,
   StudentFeedbackNote,
   SyllabusRecord,
   TeachAgenda,
@@ -56,15 +57,50 @@ export const syllabusApi = {
   list: () => request<SyllabusRecord[]>("/api/syllabus"),
   get: (id: string) => request<SyllabusDetail>(`/api/syllabus/${id}`),
   courseFeedback: (id: string) => request<Record<string, StudentFeedbackNote[]>>(`/api/syllabus/${encodeURIComponent(id)}/feedback`),
-  create: (courseName: string) =>
-    request<SyllabusDetail>("/api/syllabus", { method: "POST", body: JSON.stringify({ courseName }) }),
+  create: (courseName: string, modules?: SyllabusModule[]) =>
+    request<SyllabusDetail>("/api/syllabus", {
+      method: "POST",
+      body: JSON.stringify({ courseName, ...(modules && modules.length > 0 ? { modules } : {}) }),
+    }),
   save: (id: string, modules: SyllabusModule[]) =>
     request<SyllabusDetail>(`/api/syllabus/${id}`, { method: "PUT", body: JSON.stringify({ modules }) }),
+  submit: (id: string) => request<SyllabusDetail>(`/api/syllabus/${id}/submit`, { method: "POST", body: JSON.stringify({}) }),
+  approve: (id: string) => request<SyllabusDetail>(`/api/syllabus/${id}/approve`, { method: "POST", body: JSON.stringify({}) }),
+  withdraw: (id: string, note = "") =>
+    request<SyllabusDetail>(`/api/syllabus/${id}/withdraw`, { method: "POST", body: JSON.stringify({ note }) }),
   publish: (id: string, effectiveDate?: string) =>
     request<SyllabusDetail>(`/api/syllabus/${id}/publish`, {
       method: "POST",
       body: JSON.stringify({ effectiveDate }),
     }),
+  importCourseFile: async (file: File, courseName = ""): Promise<{ syllabus: SyllabusDetail; warnings: SyllabusPdfWarning[]; created: boolean }> => {
+    if (!auth?.currentUser) throw new Error("You must be signed in.");
+    if (file.size > 8 * 1024 * 1024) throw new Error("Choose a file of 8 MB or less.");
+    const token = await auth.currentUser.getIdToken();
+    const params = new URLSearchParams({ name: file.name });
+    if (courseName.trim()) params.set("course", courseName.trim());
+    const response = await fetch(`/api/syllabus/import-file?${params.toString()}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.message || `Request failed (${response.status})`);
+    return body.data as { syllabus: SyllabusDetail; warnings: SyllabusPdfWarning[]; created: boolean };
+  },
+  previewFile: async (file: File): Promise<SyllabusPdfPreview> => {
+    if (!auth?.currentUser) throw new Error("You must be signed in.");
+    if (file.size > 8 * 1024 * 1024) throw new Error("Choose a file of 8 MB or less.");
+    const token = await auth.currentUser.getIdToken();
+    const response = await fetch(`/api/syllabus/preview-file?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.message || `Request failed (${response.status})`);
+    return body.data as SyllabusPdfPreview;
+  },
   importPdf: async (id: string, file: File): Promise<SyllabusPdfPreview> => {
     if (!auth?.currentUser) throw new Error("You must be signed in.");
     if (file.size > 8 * 1024 * 1024) throw new Error("Choose a file of 8 MB or less.");

@@ -59,14 +59,6 @@ const studentParentPairs: { student: TestUser; parent: TestUser }[] = [
     student: { email: 'student3@example.com', password: 'Student#2026', role: 'student', description: 'Kabir Joshi · Game Art Design' },
     parent: { email: 'parent3@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Kabir Joshi' },
   },
-  {
-    student: { email: 'sanyamgandhi0131@gmail.com', password: 'Student#2026', role: 'student', description: 'Myra Patel · Digital Marketing' },
-    parent: { email: 'parent4@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Myra Patel' },
-  },
-  {
-    student: { email: 'student5@example.com', password: 'Student#2026', role: 'student', description: 'Vivaan Rao · Game Art Design' },
-    parent: { email: 'parent5@example.com', password: 'Parent#2026', role: 'parent', description: 'Parent of Vivaan Rao' },
-  },
 ];
 
 export default function TestCredentials() {

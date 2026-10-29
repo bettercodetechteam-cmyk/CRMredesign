@@ -145,6 +145,26 @@ export function registerSyllabusRoutes(app: Express) {
     res.status(201).json({ success: true, data: await svc.createSyllabus(req.caller!, req.body ?? {}) });
   }));
 
+  app.post("/api/syllabus/preview-file", requireAuth, fileBody, wrap(async (req, res, svc) => {
+    const file = Buffer.isBuffer(req.body) ? req.body : null;
+    if (!file) {
+      res.status(400).json({ success: false, message: "Upload a PDF, Word, or Excel file." });
+      return;
+    }
+    res.json({ success: true, data: await svc.previewFile(req.caller!, file, queryText(req.query.name)) });
+  }));
+
+  app.post("/api/syllabus/import-file", requireAuth, fileBody, wrap(async (req, res, svc) => {
+    const file = Buffer.isBuffer(req.body) ? req.body : null;
+    if (!file) {
+      res.status(400).json({ success: false, message: "Upload a PDF, Word, or Excel file." });
+      return;
+    }
+    const fileName = queryText(req.query.name);
+    const courseName = queryText(req.query.course);
+    res.json({ success: true, data: await svc.importCourseFile(req.caller!, file, fileName, courseName) });
+  }));
+
   app.get("/api/syllabus/:id/feedback", requireAuth, wrap(async (req, res, svc) => {
     res.json({ success: true, data: await svc.courseFeedback(req.caller!, req.params.id) });
   }));
@@ -163,6 +183,18 @@ export function registerSyllabusRoutes(app: Express) {
 
   app.delete("/api/syllabus/:id", requireAuth, wrap(async (req, res, svc) => {
     res.json({ success: true, data: await svc.deleteDraftSyllabus(req.caller!, req.params.id) });
+  }));
+
+  app.post("/api/syllabus/:id/submit", requireAuth, wrap(async (req, res, svc) => {
+    res.json({ success: true, data: await svc.submitSyllabus(req.caller!, req.params.id) });
+  }));
+
+  app.post("/api/syllabus/:id/approve", requireAuth, wrap(async (req, res, svc) => {
+    res.json({ success: true, data: await svc.approveSyllabus(req.caller!, req.params.id) });
+  }));
+
+  app.post("/api/syllabus/:id/withdraw", requireAuth, wrap(async (req, res, svc) => {
+    res.json({ success: true, data: await svc.withdrawSyllabus(req.caller!, req.params.id, req.body ?? {}) });
   }));
 
   app.post("/api/syllabus/:id/publish", requireAuth, wrap(async (req, res, svc) => {

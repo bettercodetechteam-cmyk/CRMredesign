@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -138,6 +138,8 @@ import { resetBettercodeReceiptCounter, renumberBettercodeReceipts, decrementRec
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import whatsappIcon from '@/assets/whatsapp-color-svgrepo-com.svg';
+
+const AnnualGst = lazy(() => import('@/components/fee-management/AnnualGst'));
 
 interface FeeRecord {
   id: string;
@@ -296,7 +298,7 @@ export default function EnhancedFeeManagement() {
   const [customCourseInput, setCustomCourseInput] = useState("");
   const [courseSearchTerm, setCourseSearchTerm] = useState("");
   const [installmentsPaidInput, setInstallmentsPaidInput] = useState(0);
-  const [feeActiveTab, setFeeActiveTab] = useState<'records' | 'analytics' | 'monthly-due'>('records');
+  const [feeActiveTab, setFeeActiveTab] = useState<'records' | 'analytics' | 'monthly-due' | 'annual-gst'>('records');
 
   // Helper function to safely convert any value to a renderable string
   const safeRender = (value: any): string => {
@@ -2968,8 +2970,8 @@ If you have already made the payment, please ignore this message. For any clarif
           </Card>
         </div>
 
-        <Tabs value={feeActiveTab} onValueChange={(v) => setFeeActiveTab(v as 'records' | 'analytics' | 'monthly-due')} className="w-full">
-          <TabsList className="grid w-full max-w-2xl grid-cols-3 gap-1 p-1 bg-slate-100 rounded-lg mb-6">
+        <Tabs value={feeActiveTab} onValueChange={(v) => setFeeActiveTab(v as 'records' | 'analytics' | 'monthly-due' | 'annual-gst')} className="w-full">
+          <TabsList className="grid w-full max-w-3xl grid-cols-2 sm:grid-cols-4 h-auto gap-1 p-1 bg-slate-100 rounded-lg mb-6">
             <TabsTrigger
               value="records"
               className="flex items-center gap-2 text-sm font-medium px-4 py-2.5 rounded-md data-[state=active]:bg-white data-[state=active]:text-emerald-600 data-[state=active]:shadow-md data-[state=active]:font-semibold hover:bg-slate-50"
@@ -2990,6 +2992,13 @@ If you have already made the payment, please ignore this message. For any clarif
             >
               <BarChart3 className="w-4 h-4" />
               Analytics
+            </TabsTrigger>
+            <TabsTrigger
+              value="annual-gst"
+              className="flex items-center gap-2 text-sm font-medium px-4 py-2.5 rounded-md data-[state=active]:bg-white data-[state=active]:text-emerald-600 data-[state=active]:shadow-md data-[state=active]:font-semibold hover:bg-slate-50"
+            >
+              <Receipt className="w-4 h-4" />
+              Annual GST
             </TabsTrigger>
           </TabsList>
 
@@ -3574,6 +3583,12 @@ If you have already made the payment, please ignore this message. For any clarif
                 </CardContent>
               </Card>
             </div>
+          </TabsContent>
+
+          <TabsContent value="annual-gst" className="mt-0">
+            <Suspense fallback={<InlineLoading />}>
+              <AnnualGst />
+            </Suspense>
           </TabsContent>
         </Tabs>
 

@@ -97,6 +97,20 @@ export async function authenticateRequest(req: Request, res: Response): Promise<
   return caller;
 }
 
+/** Returns the signed-in user, or null. Does not write an error response. */
+export async function optionalCaller(req: Request): Promise<AuthCaller | null> {
+  if (!req.headers.authorization?.startsWith("Bearer ")) return null;
+  const sink = {
+    status() { return sink; },
+    json() { return sink; },
+  } as unknown as Response;
+  try {
+    return await authenticateRequest(req, sink);
+  } catch {
+    return null;
+  }
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
     const caller = await authenticateRequest(req, res);

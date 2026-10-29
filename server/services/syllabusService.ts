@@ -8,6 +8,10 @@
  * read to resolve batch ids and course names, and is never rewritten.
  *
  * Single-field lookups use automatic indexes. Composite indexes for
+ * A course version moves draft -> submitted -> approved -> published.
+ * Faculty can draft and submit. Only a director or academic head can approve and publish.
+ * Older documents stay draft or published. Submitted and approved are stored on the version.
+ *
  * syllabi (centreId + courseName), syllabusVersions (syllabusId + status),
  * topicFeedback (batchId + topicId), and batchPlans (centreId + facultyUid)
  * are in firestore.indexes.json.
@@ -34,6 +38,7 @@ import {
   displayLessonStatus,
   phoneLoginEmail,
 } from "../../shared/syllabusLogic";
+import { readSyllabusStatus } from "../../shared/courseSetup";
 import type {
   BatchPlanDetail,
   BatchSummary,
@@ -58,6 +63,7 @@ import type {
   SyllabusMeta,
   SyllabusModule,
   SyllabusPdfPreview,
+  SyllabusPdfWarning,
   SyllabusRecord,
   SyllabusTopic,
   StudentFeedbackNote,
@@ -235,6 +241,7 @@ function sanitizeModules(value: unknown): SyllabusModule[] {
     const module = (item ?? {}) as DocData;
     const title = text(module.title);
     if (!title) throw new SyllabusError("Every module needs a title.", 400);
+    if (title.length > 200) throw new SyllabusError("Module titles must be 200 characters or fewer.", 400);
     const topicsIn = Array.isArray(module.topics) ? module.topics : [];
     if (topicsIn.length === 0) {
       throw new SyllabusError(`Add at least one topic to "${title}".`, 400);
@@ -245,6 +252,7 @@ function sanitizeModules(value: unknown): SyllabusModule[] {
       const row = (topic ?? {}) as DocData;
       const topicTitle = text(row.title);
       if (!topicTitle) throw new SyllabusError(`Every topic in "${title}" needs a title.`, 400);
+      if (topicTitle.length > 200) throw new SyllabusError("Topic titles must be 200 characters or fewer.", 400);
       let estimatedMinutes: number | null = null;
       if (row.estimatedMinutes !== undefined && row.estimatedMinutes !== null && row.estimatedMinutes !== "") {
         const minutes = Number(row.estimatedMinutes);
@@ -284,9 +292,12 @@ export class SyllabusService {
     const profile = await this.profile(caller);
     this.assertModule(caller, profile);
     const role = normalizeRole(text(profile.role) || caller.role);
+    const canAuthor = this.canAuthor(caller, profile);
     return {
       role,
-      canEditSyllabus: this.canEdit(caller, profile),
+      canAuthor,
+      canEditSyllabus: canAuthor,
+      canReview: this.isReviewer(caller, profile),
       canCoordinate: this.isCoordinator(caller),
       canTeach: role === "faculty",
       canSubmitFeedback: role === "student",
@@ -320,7 +331,7 @@ export class SyllabusService {
   }
 
   async listSyllabi(caller: AuthCaller): Promise<SyllabusRecord[]> {
-    const { centreId } = await this.coordinatorContext(caller);
+    const { centreId } = await this.readerContext(caller);
     const [syllabiSnap, plans, batches] = await Promise.all([
       this.db.collection("syllabi").where("centreId", "==", centreId).get(),
       this.plansForCentre(centreId),
@@ -334,7 +345,7 @@ export class SyllabusService {
   }
 
   async getSyllabus(caller: AuthCaller, syllabusId: string): Promise<SyllabusDetail> {
-    const { centreId } = await this.coordinatorContext(caller);
+    const { centreId } = await this.readerContext(caller);
     return this.loadSyllabusDetail(assertId(syllabusId, "Syllabus"), centreId);
   }
 
@@ -372,41 +383,46 @@ export class SyllabusService {
     const courseName = text(body.courseName);
     if (!courseName) throw new SyllabusError("Type a course name.", 400);
     if (courseName.length > 80) throw new SyllabusError("Course names must be 80 characters or fewer.", 400);
-    const existing = await this.db.collection("syllabi").where("centreId", "==", centreId).get();
-    if (existing.docs.some((docSnap) => text(docSnap.data().courseName).toLowerCase() === courseName.toLowerCase())) {
-      throw new SyllabusError("A syllabus already exists for this course.", 409);
-    }
+    const modules = Array.isArray(body.modules) && body.modules.length > 0 ? sanitizeModules(body.modules) : [];
     const ref = this.db.collection("syllabi").doc();
+    const versionRef = this.db.collection("syllabusVersions").doc(versionDocId(ref.id, 1));
     const now = new Date().toISOString();
-    const batch = this.db.batch();
-    batch.set(ref, {
-      courseName,
-      status: "draft",
-      currentVersion: 0,
-      createdBy: caller.id,
-      updatedAt: now,
-      createdAt: now,
-      centreId,
+    await this.db.runTransaction(async (transaction) => {
+      const existing = await transaction.get(this.db.collection("syllabi").where("centreId", "==", centreId));
+      if (existing.docs.some((docSnap) => text(docSnap.data().courseName).toLowerCase() === courseName.toLowerCase())) {
+        throw new SyllabusError("A syllabus already exists for this course.", 409);
+      }
+      transaction.create(ref, {
+        courseName,
+        status: "draft",
+        currentVersion: 0,
+        createdBy: caller.id,
+        updatedAt: now,
+        createdAt: now,
+        centreId,
+      });
+      transaction.create(versionRef, {
+        syllabusId: ref.id,
+        version: 1,
+        status: "draft",
+        modules,
+        createdBy: caller.id,
+        createdAt: now,
+      });
     });
-    batch.set(this.db.collection("syllabusVersions").doc(versionDocId(ref.id, 1)), {
-      syllabusId: ref.id,
-      version: 1,
-      status: "draft",
-      modules: [],
-      createdBy: caller.id,
-      createdAt: now,
-    });
-    await batch.commit();
     return this.loadSyllabusDetail(ref.id, centreId);
   }
 
   async updateSyllabus(caller: AuthCaller, syllabusId: string, body: DocData): Promise<SyllabusDetail> {
-    const { centreId } = await this.editorContext(caller);
+    const { centreId, profile } = await this.editorContext(caller);
     const id = assertId(syllabusId, "Syllabus");
     const syllabus = await this.requireSyllabus(id, centreId);
     const modules = sanitizeModules(body.modules);
     const versions = await this.versionsFor(id);
-    const draft = versions.find((version) => version.status === "draft");
+    const draft = versions.find((version) => version.status !== "published");
+    if (draft && draft.status !== "draft" && !this.isReviewer(caller, profile)) {
+      throw new SyllabusError("This course is in review. Withdraw the submission before editing it.", 403);
+    }
     const now = new Date().toISOString();
     if (draft) {
       await this.db.collection("syllabusVersions").doc(draft.id).update({ modules, createdBy: caller.id });
@@ -425,6 +441,43 @@ export class SyllabusService {
     return this.loadSyllabusDetail(id, centreId);
   }
 
+  /** Creates or updates one course from the syllabus title inside a file. Saves a draft and does not publish. */
+  async importCourseFile(
+    caller: AuthCaller,
+    file: Buffer,
+    fileName = "",
+    preferredName = "",
+  ): Promise<{ syllabus: SyllabusDetail; warnings: SyllabusPdfWarning[]; unimported: SyllabusPdfWarning[]; created: boolean }> {
+    const { centreId } = await this.editorContext(caller);
+    if (!file.length) throw new SyllabusError("Upload a PDF, Word, or Excel file.", 400);
+    let preview: SyllabusPdfPreview;
+    try {
+      preview = await extractSyllabusFile(file, fileName);
+    } catch (error) {
+      if (error instanceof SyllabusPdfError) throw new SyllabusError(error.message, 400);
+      throw new SyllabusError("This file could not be read. Use a PDF, Word, or Excel syllabus table and try again.", 400);
+    }
+    const courseName = (text(preferredName) || text(preview.courseName)).slice(0, 80);
+    if (!courseName) throw new SyllabusError("This file has no course name. Type a course name, then upload it.", 400);
+    const existing = await this.syllabusByCourse(centreId, courseName);
+    const created = !existing;
+    const id = existing?.id ?? (await this.createSyllabus(caller, { courseName })).id;
+    const syllabus = await this.updateSyllabus(caller, id, { modules: preview.modules });
+    return { syllabus, warnings: preview.warnings, unimported: preview.unimported, created };
+  }
+
+  /** Reads a syllabus file for the setup preview. It does not save or publish. */
+  async previewFile(caller: AuthCaller, file: Buffer, fileName = ""): Promise<SyllabusPdfPreview> {
+    await this.editorContext(caller);
+    if (!file.length) throw new SyllabusError("Upload a PDF, Word, or Excel file.", 400);
+    try {
+      return await extractSyllabusFile(file, fileName);
+    } catch (error) {
+      if (error instanceof SyllabusPdfError) throw new SyllabusError(error.message, 400);
+      throw new SyllabusError("This file could not be read. Use a PDF, Word, or Excel syllabus table and try again.", 400);
+    }
+  }
+
   /** Reads a PDF, Word, or Excel file into modules for the editor. Does not save or publish. */
   async previewPdf(caller: AuthCaller, syllabusId: string, file: Buffer, fileName = ""): Promise<SyllabusPdfPreview> {
     const { centreId } = await this.editorContext(caller);
@@ -438,13 +491,68 @@ export class SyllabusService {
     }
   }
 
+  async submitSyllabus(caller: AuthCaller, syllabusId: string): Promise<SyllabusDetail> {
+    const { id, centreId, open } = await this.workingCopy(caller, syllabusId, "author");
+    if (open.status !== "draft") throw new SyllabusError("Only a draft can be submitted for review.", 400);
+    this.assertTopics(open.modules);
+    const now = new Date().toISOString();
+    await this.db.collection("syllabusVersions").doc(open.id).update({
+      status: "submitted",
+      submittedAt: now,
+      submittedBy: caller.id,
+      reviewNote: "",
+    });
+    await this.db.collection("syllabi").doc(id).update({ updatedAt: now });
+    return this.loadSyllabusDetail(id, centreId);
+  }
+
+  async approveSyllabus(caller: AuthCaller, syllabusId: string): Promise<SyllabusDetail> {
+    const { id, centreId, open } = await this.workingCopy(caller, syllabusId, "reviewer");
+    if (open.status !== "submitted") throw new SyllabusError("Submit the course before approving it.", 400);
+    this.assertTopics(open.modules);
+    const now = new Date().toISOString();
+    await this.db.collection("syllabusVersions").doc(open.id).update({
+      status: "approved",
+      approvedAt: now,
+      approvedBy: caller.id,
+    });
+    await this.db.collection("syllabi").doc(id).update({ updatedAt: now });
+    return this.loadSyllabusDetail(id, centreId);
+  }
+
+  async withdrawSyllabus(caller: AuthCaller, syllabusId: string, body: DocData): Promise<SyllabusDetail> {
+    const { profile, centreId } = await this.context(caller);
+    this.assertModule(caller, profile);
+    const reviewer = this.isReviewer(caller, profile);
+    if (!this.canAuthor(caller, profile) && !reviewer) {
+      throw new SyllabusError("You cannot change this course.", 403);
+    }
+    const id = assertId(syllabusId, "Syllabus");
+    await this.requireSyllabus(id, centreId);
+    const open = (await this.versionsFor(id)).find((version) => version.status !== "published");
+    if (!open || (open.status !== "submitted" && open.status !== "approved")) {
+      throw new SyllabusError("Only a submitted or approved course can return to draft.", 400);
+    }
+    if (open.status === "approved" && !reviewer) {
+      throw new SyllabusError("An approved course can be returned by a director or academic head.", 403);
+    }
+    const note = text(body.note).slice(0, 500);
+    const now = new Date().toISOString();
+    await this.db.collection("syllabusVersions").doc(open.id).update({
+      status: "draft",
+      reviewNote: note,
+    });
+    await this.db.collection("syllabi").doc(id).update({ updatedAt: now });
+    return this.loadSyllabusDetail(id, centreId);
+  }
+
   async publishSyllabus(caller: AuthCaller, syllabusId: string, body: DocData): Promise<SyllabusDetail> {
-    const { centreId } = await this.editorContext(caller);
+    const { centreId } = await this.reviewerContext(caller);
     const id = assertId(syllabusId, "Syllabus");
     await this.requireSyllabus(id, centreId);
     const versions = await this.versionsFor(id);
-    const draft = versions.find((version) => version.status === "draft");
-    if (!draft) throw new SyllabusError("Save a draft before publishing.", 400);
+    const draft = versions.find((version) => version.status === "approved");
+    if (!draft) throw new SyllabusError("Approve the course before publishing it.", 400);
     if (draft.modules.length === 0 || draft.modules.every((module) => module.topics.length === 0)) {
       throw new SyllabusError("Add at least one module with a topic before publishing.", 400);
     }
@@ -467,9 +575,13 @@ export class SyllabusService {
   }
 
   async deleteDraftSyllabus(caller: AuthCaller, syllabusId: string): Promise<{ deleted: boolean }> {
-    const { centreId } = await this.editorContext(caller);
+    const { centreId, profile } = await this.editorContext(caller);
     const id = assertId(syllabusId, "Syllabus");
     const syllabus = await this.requireSyllabus(id, centreId);
+    const open = (await this.versionsFor(id)).find((version) => version.status !== "published");
+    if (open?.status === "approved" && !this.isReviewer(caller, profile)) {
+      throw new SyllabusError("An approved course can only be removed by a director or academic head.", 403);
+    }
     if (syllabus.currentVersion > 0) {
       throw new SyllabusError("A published syllabus cannot be deleted. Edit it to create the next version.", 400);
     }
@@ -486,7 +598,7 @@ export class SyllabusService {
   }
 
   async deleteVersion(caller: AuthCaller, syllabusIdRaw: string, versionRaw: string): Promise<SyllabusDetail | null> {
-    const { centreId } = await this.editorContext(caller);
+    const { centreId } = await this.reviewerContext(caller);
     const id = assertId(syllabusIdRaw, "Syllabus");
     const versionNumber = Number(versionRaw);
     if (!Number.isInteger(versionNumber) || versionNumber < 1) {
@@ -519,8 +631,9 @@ export class SyllabusService {
       return null;
     }
 
+    const open = remaining.find((version) => version.status !== "published");
     write.update(this.db.collection("syllabi").doc(id), {
-      status: latestPublished ? "published" : "draft",
+      status: latestPublished ? "published" : (open?.status ?? "draft"),
       currentVersion: latestPublished?.version ?? 0,
       updatedAt: now,
     });
@@ -870,6 +983,8 @@ export class SyllabusService {
       batchId,
       batchName: batches.find((batch) => batch.id === batchId)?.name || "Batch",
       courseName: text(plan.courseName),
+      moduleTitle: module.title,
+      topicId: topic.id,
       plannedDate: text(schedule?.plannedDate),
       originalPlannedDate: text(schedule?.originalPlannedDate),
       topicTitle: topic.title,
@@ -1030,27 +1145,40 @@ export class SyllabusService {
       this.userNames(),
     ]);
     const batchMap = new Map(batches.map((batch) => [batch.id, batch]));
-    let scoped: FlatTopic[] = [];
     const feedbackByTopic = new Map<string, number>();
-    for (const plan of plans) {
-      if (filters.course && plan.courseName !== filters.course) continue;
-      if (filters.batchId && plan.batchId !== filters.batchId) continue;
-      const version = await this.versionData(plan.syllabusId, plan.syllabusVersion);
-      const rows = await this.flattenPlan(plan.batchId, batchMap.get(plan.batchId)?.name || "Batch", version, names);
-      const kept = rows.filter(
-        (topic) =>
-          !filters.facultyUid ||
-          plan.facultyUid === filters.facultyUid ||
-          topic.teacherUid === filters.facultyUid
-      );
-      scoped = scoped.concat(kept);
-      const feedbackSnap = await this.db.collection("topicFeedback").where("batchId", "==", plan.batchId).get();
+    const versionCache = new Map<string, Promise<SyllabusVersion>>();
+    const parts = await Promise.all(plans.map(async (plan) => {
+      if (filters.course && plan.courseName !== filters.course) return [] as FlatTopic[];
+      if (filters.batchId && plan.batchId !== filters.batchId) return [] as FlatTopic[];
+      const versionKey = `${plan.syllabusId}:${plan.syllabusVersion}`;
+      const cachedVersion = versionCache.get(versionKey);
+      const version = cachedVersion ?? this.versionData(plan.syllabusId, plan.syllabusVersion);
+      if (!cachedVersion) versionCache.set(versionKey, version);
+      const syllabusVersion = await version;
+      const [rows, feedbackSnap] = await Promise.all([
+        this.flattenPlan(
+          plan.batchId,
+          batchMap.get(plan.batchId)?.name || "Batch",
+          syllabusVersion,
+          names,
+          plan.courseName,
+          plan.facultyUid
+        ),
+        this.db.collection("topicFeedback").where("batchId", "==", plan.batchId).get(),
+      ]);
       feedbackSnap.docs.forEach((docSnap) => {
         if (text(docSnap.data().understanding) !== "need_help") return;
         const key = `${plan.batchId}_${text(docSnap.data().topicId)}`;
         feedbackByTopic.set(key, (feedbackByTopic.get(key) ?? 0) + 1);
       });
-    }
+      return rows.filter(
+        (topic) =>
+          !filters.facultyUid ||
+          plan.facultyUid === filters.facultyUid ||
+          topic.teacherUid === filters.facultyUid
+      );
+    }));
+    const scoped = parts.flat();
     const scheduleIncomplete = scoped.some((topic) => !topic.plannedDate);
     const lessonsIncomplete = scoped.some((topic) => !topic.status);
     const ranged = scoped.filter((topic) => {
@@ -1344,10 +1472,47 @@ export class SyllabusService {
   private async editorContext(caller: AuthCaller): Promise<{ profile: DocData; centreId: string }> {
     const ctx = await this.context(caller);
     this.assertModule(caller, ctx.profile);
-    if (!this.canEdit(caller, ctx.profile)) {
-      throw new SyllabusError("You can view syllabi, but only an academic head or director can edit them.", 403);
+    if (!this.canAuthor(caller, ctx.profile)) {
+      throw new SyllabusError("Faculty can draft a course. A director can also allow a centre head to draft.", 403);
     }
     return ctx;
+  }
+
+  private async readerContext(caller: AuthCaller): Promise<{ profile: DocData; centreId: string }> {
+    const ctx = await this.context(caller);
+    this.assertModule(caller, ctx.profile);
+    if (!this.isCoordinator(caller) && !this.canAuthor(caller, ctx.profile)) {
+      throw new SyllabusError("This page is for faculty and coordinators.", 403);
+    }
+    return ctx;
+  }
+
+  private async reviewerContext(caller: AuthCaller): Promise<{ profile: DocData; centreId: string }> {
+    const ctx = await this.context(caller);
+    this.assertModule(caller, ctx.profile);
+    if (!this.isReviewer(caller, ctx.profile)) {
+      throw new SyllabusError("Only a director or academic head can approve or publish a course.", 403);
+    }
+    return ctx;
+  }
+
+  private async workingCopy(
+    caller: AuthCaller,
+    syllabusId: string,
+    mode: "author" | "reviewer"
+  ): Promise<{ id: string; centreId: string; open: SyllabusVersion }> {
+    const { centreId } = mode === "reviewer" ? await this.reviewerContext(caller) : await this.editorContext(caller);
+    const id = assertId(syllabusId, "Syllabus");
+    await this.requireSyllabus(id, centreId);
+    const open = (await this.versionsFor(id)).find((version) => version.status !== "published");
+    if (!open) throw new SyllabusError("Save a draft before continuing.", 400);
+    return { id, centreId, open };
+  }
+
+  private assertTopics(modules: SyllabusModule[]): void {
+    if (modules.length === 0 || modules.every((module) => module.topics.length === 0)) {
+      throw new SyllabusError("Add at least one module with a topic first.", 400);
+    }
   }
 
   private async linkerContext(caller: AuthCaller): Promise<{ profile: DocData; centreId: string }> {
@@ -1397,6 +1562,20 @@ export class SyllabusService {
     return permissionList(profile.permissionsGranted).includes("syllabus");
   }
 
+  /** Faculty draft and submit. Centre heads draft only after a director grants syllabus editing. */
+  private canAuthor(caller: AuthCaller, profile: DocData): boolean {
+    if (caller.isDirector) return true;
+    const role = normalizeRole(text(profile.role) || caller.role);
+    if (role === "student" || role === "parent") return false;
+    if (role === "academic_head" || role === "faculty") return true;
+    return permissionList(profile.permissionsGranted).includes("syllabus");
+  }
+
+  private isReviewer(caller: AuthCaller, profile: DocData): boolean {
+    if (caller.isDirector) return true;
+    return normalizeRole(text(profile.role) || caller.role) === "academic_head";
+  }
+
   private canLink(caller: AuthCaller): boolean {
     if (caller.isDirector) return true;
     return normalizeRole(caller.role) === "academic_head";
@@ -1420,7 +1599,7 @@ export class SyllabusService {
   private async loadSyllabusDetail(syllabusId: string, centreId: string): Promise<SyllabusDetail> {
     const record = await this.requireSyllabus(syllabusId, centreId);
     const versions = await this.versionsFor(syllabusId);
-    const draft = versions.find((version) => version.status === "draft") ?? null;
+    const draft = versions.find((version) => version.status !== "published") ?? null;
     const published = versions
       .filter((version) => version.status === "published")
       .sort((a, b) => b.version - a.version)[0] ?? null;
@@ -1448,10 +1627,13 @@ export class SyllabusService {
           syllabusId,
           version: Number(data.version ?? 0),
           effectiveDate: text(data.effectiveDate) || undefined,
-          status: data.status === "published" ? "published" as const : "draft" as const,
+          status: readSyllabusStatus(data.status),
           modules: readModules(data.modules),
           createdBy: text(data.createdBy),
           createdAt: text(data.createdAt) || undefined,
+          submittedAt: text(data.submittedAt) || undefined,
+          approvedAt: text(data.approvedAt) || undefined,
+          reviewNote: text(data.reviewNote) || undefined,
         };
       })
       .sort((a, b) => a.version - b.version);
@@ -1466,9 +1648,10 @@ export class SyllabusService {
       syllabusId,
       version: Number(data.version ?? version),
       effectiveDate: text(data.effectiveDate) || undefined,
-      status: data.status === "published" ? "published" : "draft",
+      status: readSyllabusStatus(data.status),
       modules: readModules(data.modules),
       createdBy: text(data.createdBy),
+      reviewNote: text(data.reviewNote) || undefined,
     };
   }
 
@@ -1480,12 +1663,15 @@ export class SyllabusService {
   ): Promise<SyllabusRecord> {
     const versions = await this.versionsFor(id);
     const currentVersion = Number(data.currentVersion ?? 0);
+    const open = versions.find((version) => version.status !== "published");
+    const status = open ? open.status : currentVersion > 0 ? "published" : "draft";
     return {
       id,
       courseName: text(data.courseName),
-      status: data.status === "published" ? "published" : "draft",
+      status,
+      openStatus: open?.status ?? null,
       currentVersion,
-      draftVersion: versions.find((version) => version.status === "draft")?.version ?? null,
+      draftVersion: open?.version ?? null,
       createdBy: text(data.createdBy),
       updatedAt: text(data.updatedAt) || undefined,
       batchesOnOlderVersion: plans
@@ -1595,8 +1781,8 @@ export class SyllabusService {
         name: text(entry.name) || personName(student),
         course: text(entry.course) || text(student.course) || text(student.courseInterest),
         teacherName: text(entry.teacherId),
-        startDate: calendar(entry.startDate) || calendar(student.admissionDate),
-        endDate: calendar(entry.endDate),
+        startDate: calendar(entry.startDate) || calendar(student.courseStartDate) || calendar(student.admissionDate),
+        endDate: calendar(entry.endDate) || calendar(student.courseEndDate),
       });
       const extras = Array.isArray(student.courseEnrollments) ? (student.courseEnrollments as DocData[]) : [];
       extras.forEach((item) => {
@@ -1608,7 +1794,7 @@ export class SyllabusService {
           name: personName(student),
           course,
           teacherName: "",
-          startDate: calendar(student.admissionDate),
+          startDate: calendar(student.courseStartDate) || calendar(student.admissionDate),
           endDate: calendar(student.courseEndDate),
         });
       });
@@ -1628,10 +1814,52 @@ export class SyllabusService {
   }
 
   private async requireBatch(centreId: string, batchId: string): Promise<BatchRecord> {
+    const direct = await this.batchRecord(centreId, batchId);
+    if (direct) return direct;
     const batches = await this.listBatchRecords(centreId);
     const batch = batches.find((item) => item.id === batchId);
     if (!batch) throw new SyllabusError("That batch does not exist.", 404);
     return batch;
+  }
+
+  private async batchRecord(centreId: string, batchId: string): Promise<BatchRecord | null> {
+    const entrySnap = await this.db.collection("batchEntriesData").doc(centreId).get();
+    const data = entrySnap.exists ? (entrySnap.data() as DocData) : {};
+    const entries = data.entries && typeof data.entries === "object" ? (data.entries as Record<string, DocData>) : {};
+    const removed = new Set(Array.isArray(data.removedFromBatchIds) ? data.removedFromBatchIds.map(String) : []);
+    if (removed.has(batchId)) return null;
+    const entry = entries[batchId] ?? {};
+    if (batchId.startsWith("manual-")) {
+      if (!entries[batchId]) return null;
+      return {
+        id: batchId,
+        name: text(entry.name) || "Manual batch",
+        course: text(entry.course),
+        teacherName: text(entry.teacherId),
+        startDate: calendar(entry.startDate),
+        endDate: calendar(entry.endDate),
+      };
+    }
+    const studentId = batchId.includes("__") ? batchId.slice(0, batchId.indexOf("__")) : batchId;
+    const snap = await this.db.collection("students").doc(studentId).get();
+    if (!snap.exists) return null;
+    const student = snap.data() as DocData;
+    if (text(student.centreId) && text(student.centreId) !== centreId) return null;
+    let course = text(student.course);
+    if (studentId !== batchId) {
+      const extras = Array.isArray(student.courseEnrollments) ? (student.courseEnrollments as DocData[]) : [];
+      const match = extras.find((item) => text(item.batchId) === batchId);
+      if (!match) return null;
+      course = text(match.course) || text(match.courseName);
+    }
+    return {
+      id: batchId,
+      name: text(entry.name) || personName(student),
+      course: text(entry.course) || course,
+      teacherName: text(entry.teacherId),
+      startDate: calendar(entry.startDate) || calendar(student.courseStartDate) || calendar(student.admissionDate),
+      endDate: calendar(entry.endDate) || calendar(student.courseEndDate),
+    };
   }
 
   private async parentCourse(
@@ -1722,7 +1950,7 @@ export class SyllabusService {
 
   private studentBatches(studentId: string, data: DocData): BatchRecord[] {
     const name = personName(data);
-    const startDate = calendar(data.admissionDate);
+    const startDate = calendar(data.courseStartDate) || calendar(data.admissionDate);
     const endDate = calendar(data.courseEndDate);
     const records: BatchRecord[] = [{
       id: studentId,
@@ -1742,21 +1970,28 @@ export class SyllabusService {
     return records;
   }
 
-  private async batchTopicState(batchId: string): Promise<{ plannedDates: Map<string, string>; statuses: Map<string, LessonStatus | null> }> {
-    const [schedules, lessons] = await Promise.all([
+  private async batchTopicDocs(batchId: string): Promise<{ schedules: Map<string, DocData>; lessons: Map<string, DocData> }> {
+    const [scheduleSnap, lessonSnap] = await Promise.all([
       this.db.collection("topicSchedules").where("batchId", "==", batchId).get(),
       this.db.collection("lessonUpdates").where("batchId", "==", batchId).get(),
     ]);
+    const schedules = new Map<string, DocData>();
+    const lessons = new Map<string, DocData>();
+    const remember = (docSnap: { id: string; data: () => DocData }, target: Map<string, DocData>) => {
+      const topicId = text(docSnap.data().topicId) || docSnap.id.slice(batchId.length + 1);
+      if (topicId) target.set(topicId, docSnap.data());
+    };
+    scheduleSnap.docs.forEach((docSnap) => remember(docSnap, schedules));
+    lessonSnap.docs.forEach((docSnap) => remember(docSnap, lessons));
+    return { schedules, lessons };
+  }
+
+  private async batchTopicState(batchId: string): Promise<{ plannedDates: Map<string, string>; statuses: Map<string, LessonStatus | null> }> {
+    const { schedules, lessons } = await this.batchTopicDocs(batchId);
     const plannedDates = new Map<string, string>();
-    schedules.docs.forEach((docSnap) => {
-      const topicId = text(docSnap.data().topicId) || docSnap.id.slice(batchId.length + 1);
-      if (topicId) plannedDates.set(topicId, text(docSnap.data().plannedDate));
-    });
+    schedules.forEach((schedule, topicId) => plannedDates.set(topicId, text(schedule.plannedDate)));
     const statuses = new Map<string, LessonStatus | null>();
-    lessons.docs.forEach((docSnap) => {
-      const topicId = text(docSnap.data().topicId) || docSnap.id.slice(batchId.length + 1);
-      if (topicId) statuses.set(topicId, lessonStatus(docSnap.data().status));
-    });
+    lessons.forEach((lesson, topicId) => statuses.set(topicId, lessonStatus(lesson.status)));
     return { plannedDates, statuses };
   }
 
@@ -1796,29 +2031,35 @@ export class SyllabusService {
     }
     const plan = planSnap.data() as DocData;
     const version = await this.versionData(text(plan.syllabusId), Number(plan.syllabusVersion));
+    const [{ lessons }, feedbackSnap] = await Promise.all([
+      this.batchTopicDocs(batchId),
+      this.db.collection("topicFeedback").where("batchId", "==", batchId).get(),
+    ]);
+    const feedbackByTopic = new Map<string, DocData>();
+    feedbackSnap.docs.forEach((docSnap) => {
+      const data = docSnap.data() as DocData;
+      if (text(data.studentId) !== studentId) return;
+      const topicId = text(data.topicId) || docSnap.id.slice(batchId.length + 1);
+      if (topicId) feedbackByTopic.set(topicId, data);
+    });
     const topics: MyClass["topics"] = [];
     for (const module of version.modules) {
       for (const topic of module.topics) {
-        const lessonSnap = await this.db.collection("lessonUpdates").doc(scheduleDocId(batchId, topic.id)).get();
-        const status = lessonSnap.exists ? lessonStatus(lessonSnap.data()?.status) : null;
-        let understanding: Understanding | null = null;
-        let comment = "";
-        if (status === "not_covered" || status === "partly_covered" || status === "completed") {
-          const feedbackSnap = await this.db.collection("topicFeedback").doc(feedbackDocId(batchId, topic.id, studentId)).get();
-          const feedback = feedbackSnap.exists ? (feedbackSnap.data() as DocData) : null;
-          understanding = UNDERSTANDING.has(text(feedback?.understanding)) ? (text(feedback?.understanding) as Understanding) : null;
-          comment = text(feedback?.comment);
-        }
+        const lesson = lessons.get(topic.id);
+        const status = lessonStatus(lesson?.status);
+        const feedback = status === "not_covered" || status === "partly_covered" || status === "completed"
+          ? feedbackByTopic.get(topic.id)
+          : undefined;
         topics.push({
           description: text(topic.description),
           topicId: topic.id,
           moduleTitle: module.title,
           topicTitle: topic.title,
           weekLabel: text(module.weekLabel),
-          classDate: text(lessonSnap.data()?.classDate),
+          classDate: text(lesson?.classDate),
           lessonStatus: status,
-          understanding,
-          comment,
+          understanding: UNDERSTANDING.has(text(feedback?.understanding)) ? (text(feedback?.understanding) as Understanding) : null,
+          comment: text(feedback?.comment),
         });
       }
     }
@@ -1865,7 +2106,7 @@ export class SyllabusService {
     if (!syllabus) return [];
     const versions = await this.versionsFor(syllabus.id);
     const published = [...versions].reverse().find((version) => version.status === "published");
-    const source = published ?? versions.find((version) => version.status === "draft");
+    const source = published ?? versions.find((version) => version.status !== "published");
     return source?.modules ?? [];
   }
 
@@ -2089,17 +2330,17 @@ export class SyllabusService {
     batchId: string,
     batchName: string,
     version: SyllabusVersion,
-    names: Map<string, string>
+    names: Map<string, string>,
+    courseName: string,
+    facultyUid: string
   ): Promise<FlatTopic[]> {
-    const planSnap = await this.db.collection("batchPlans").doc(batchId).get();
-    const facultyUid = text(planSnap.data()?.facultyUid);
+    const { schedules, lessons } = await this.batchTopicDocs(batchId);
     const facultyName = names.get(facultyUid) || "Unassigned";
-    const courseName = text(planSnap.data()?.courseName);
     const rows: FlatTopic[] = [];
     for (const module of version.modules) {
       for (const topic of module.topics) {
-        const scheduleSnap = await this.db.collection("topicSchedules").doc(scheduleDocId(batchId, topic.id)).get();
-        const lessonSnap = await this.db.collection("lessonUpdates").doc(scheduleDocId(batchId, topic.id)).get();
+        const schedule = schedules.get(topic.id);
+        const lesson = lessons.get(topic.id);
         rows.push({
           batchId,
           batchName,
@@ -2109,10 +2350,10 @@ export class SyllabusService {
           topicId: topic.id,
           topicTitle: topic.title,
           topicOrder: topic.displayOrder,
-          plannedDate: text(scheduleSnap.data()?.plannedDate),
-          status: lessonStatus(lessonSnap.data()?.status),
+          plannedDate: text(schedule?.plannedDate),
+          status: lessonStatus(lesson?.status),
           facultyName,
-          teacherUid: text(scheduleSnap.data()?.teacherUid),
+          teacherUid: text(schedule?.teacherUid),
         });
       }
     }
@@ -2120,9 +2361,11 @@ export class SyllabusService {
   }
 
   private async buildBatchDetail(centreId: string, batchId: string): Promise<BatchPlanDetail> {
-    const batch = await this.requireBatch(centreId, batchId);
-    const names = await this.userNames();
-    const planSnap = await this.db.collection("batchPlans").doc(batchId).get();
+    const [batch, names, planSnap] = await Promise.all([
+      this.requireBatch(centreId, batchId),
+      this.userNames(),
+      this.db.collection("batchPlans").doc(batchId).get(),
+    ]);
     const syllabusSnap = batch.course
       ? await this.db.collection("syllabi").where("centreId", "==", centreId).where("courseName", "==", batch.course).limit(1).get()
       : null;
@@ -2144,17 +2387,19 @@ export class SyllabusService {
       : [];
     const plan = planSnap.exists ? (planSnap.data() as DocData) : null;
     let topics: TopicScheduleView[] = [];
-      const notes = await this.feedbackByTopic([batchId]);
     let progress = summarizeProgress([]);
     if (plan) {
-      const version = await this.versionData(text(plan.syllabusId), Number(plan.syllabusVersion));
+      const [version, docs, notes] = await Promise.all([
+        this.versionData(text(plan.syllabusId), Number(plan.syllabusVersion)),
+        this.batchTopicDocs(batchId),
+        this.feedbackByTopic([batchId]),
+      ]);
+      const { schedules, lessons } = docs;
       topics = [];
       for (const module of version.modules) {
         for (const topic of module.topics) {
-          const scheduleSnap = await this.db.collection("topicSchedules").doc(scheduleDocId(batchId, topic.id)).get();
-          const lessonSnap = await this.db.collection("lessonUpdates").doc(scheduleDocId(batchId, topic.id)).get();
-          const schedule = scheduleSnap.exists ? (scheduleSnap.data() as DocData) : null;
-          const lesson = lessonSnap.exists ? (lessonSnap.data() as DocData) : null;
+          const schedule = schedules.get(topic.id) ?? null;
+          const lesson = lessons.get(topic.id) ?? null;
           const teacherUid = text(schedule?.teacherUid);
           topics.push({
             moduleId: module.id,

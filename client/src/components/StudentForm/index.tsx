@@ -40,6 +40,24 @@ import {
   sourceManagerEvents, 
   defaultSources 
 } from "@/lib/sourceManager";
+import { ALL_STANDARDIZED_COURSES, MODULAR_PROGRAMS } from "@/lib/leadDataCleaningService";
+
+const instituteCourses = [...ALL_STANDARDIZED_COURSES, ...MODULAR_PROGRAMS];
+
+function courseChoices(syllabusNames: string[], current: string): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const name of [...instituteCourses, ...syllabusNames, current]) {
+    const trimmed = name.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || key === "other" || seen.has(key)) continue;
+    seen.add(key);
+    names.push(trimmed);
+  }
+  names.sort((a, b) => a.localeCompare(b));
+  names.push("Other");
+  return names;
+}
 
 // Helper function to convert month string to YYYY-MM format for month input
 const convertMonthToInputFormat = (monthStr: string | null | undefined): string => {
@@ -279,9 +297,7 @@ export default function StudentForm({
       .then((names) => {
         if (cancelled) return;
         const current = (form.getValues("course") || student?.course || "").trim();
-        const next = [...names];
-        if (current && !next.some((name) => name.toLowerCase() === current.toLowerCase())) next.push(current);
-        setCourses(next);
+        setCourses(courseChoices(names, current));
       })
       .catch(() => {
         if (!cancelled) setCourses([]);

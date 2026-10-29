@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import Loading from "@/components/ui/loading";
 import { formatCalendarDate } from "@shared/syllabusLogic";
 import type { ProgressSummary } from "@shared/syllabusLogic";
-import type { SyllabusAccess } from "@shared/syllabusTypes";
+import type { DashboardTopicRow, SyllabusAccess } from "@shared/syllabusTypes";
 import { cn } from "@/lib/utils";
 
 export function useSyllabusAccess() {
@@ -46,7 +46,7 @@ export function SyllabusPage({
 function SyllabusNav({ access }: { access: SyllabusAccess }) {
   const location = useLocation();
   const links = [
-    access.canCoordinate || access.canEditSyllabus ? { href: "/syllabus", label: "Setup" } : null,
+    access.canAuthor || access.canCoordinate || access.canEditSyllabus ? { href: "/syllabus", label: "Setup" } : null,
     access.canCoordinate ? { href: "/syllabus/batches", label: "Batch plans" } : null,
     access.canCoordinate ? { href: "/syllabus/dashboard", label: "Dashboard" } : null,
     access.canTeach ? { href: "/syllabus/teach", label: "My lessons" } : null,
@@ -111,6 +111,7 @@ export interface ClassStudent {
   incomplete?: number;
   notStarted?: number;
   total?: number;
+  rows?: DashboardTopicRow[];
 }
 
 export interface ClassCourse {

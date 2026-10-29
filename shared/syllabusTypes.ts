@@ -1,6 +1,6 @@
 import type { ProgressSummary } from "./syllabusLogic";
 
-export type SyllabusStatus = "draft" | "published";
+export type SyllabusStatus = "draft" | "submitted" | "approved" | "published";
 export type LessonStatus = "not_covered" | "partly_covered" | "completed";
 export type Understanding = "understood" | "partly_understood" | "need_help";
 
@@ -29,6 +29,9 @@ export interface SyllabusPdfWarning {
 export interface SyllabusPdfPreview {
   modules: SyllabusModule[];
   warnings: SyllabusPdfWarning[];
+  /** Rows that were skipped. They are not part of the draft until someone adds them. */
+  unimported: SyllabusPdfWarning[];
+  courseName?: string;
 }
 
 export interface SyllabusVersion {
@@ -40,6 +43,9 @@ export interface SyllabusVersion {
   modules: SyllabusModule[];
   createdBy: string;
   createdAt?: string;
+  submittedAt?: string;
+  approvedAt?: string;
+  reviewNote?: string;
 }
 
 export interface OlderBatchUse {
@@ -52,6 +58,8 @@ export interface SyllabusRecord {
   id: string;
   courseName: string;
   status: SyllabusStatus;
+  /** Status of the working copy when one is open. Published courses can still have a newer draft. */
+  openStatus: SyllabusStatus | null;
   currentVersion: number;
   draftVersion: number | null;
   createdBy: string;
@@ -152,7 +160,12 @@ export interface BatchPlanDetail {
 
 export interface SyllabusAccess {
   role: string;
+  /** Draft, edit, and submit a course. Faculty have this. It does not include approval. */
+  canAuthor: boolean;
+  /** Same people who can author. Kept so existing screens keep showing the editor. */
   canEditSyllabus: boolean;
+  /** Approve a submission and publish it. Directors and academic heads only. */
+  canReview: boolean;
   canCoordinate: boolean;
   canTeach: boolean;
   canSubmitFeedback: boolean;
